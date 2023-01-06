@@ -34,7 +34,9 @@ static RtlNtStatusToDosError_f RtlNtStatusToDosError;
 typedef struct
 {
     uint32_t hash;
+    DWORD attrs;
     WCHAR* path;
+    uint64_t filesize;
 } HashtableEntry;
 
 
@@ -326,6 +328,146 @@ DWORD ParseMask(WCHAR* mask)
     return attrs;
 }
 
+const CHAR *FileAttributes2String(CHAR attr_str[32], DWORD attrs)
+{
+    for (int i = 0; i < 32; i++)
+        attr_str[i] = '.';
+
+    if (attrs & FILE_ATTRIBUTE_READONLY)
+    {
+        attr_str[0] = 'R';
+        attrs &= ~FILE_ATTRIBUTE_READONLY;
+    }
+    if (attrs & FILE_ATTRIBUTE_HIDDEN)
+    {
+        attr_str[1] = 'H';
+        attrs &= ~FILE_ATTRIBUTE_HIDDEN;
+    }
+    if (attrs & FILE_ATTRIBUTE_SYSTEM)
+    {
+        attr_str[2] = 'S';
+        attrs &= ~FILE_ATTRIBUTE_SYSTEM;
+    }
+    if (attrs & FILE_ATTRIBUTE_DIRECTORY)
+    {
+        attr_str[3] = 'D';
+        attrs &= ~FILE_ATTRIBUTE_DIRECTORY;
+    }
+    if (attrs & FILE_ATTRIBUTE_ARCHIVE)
+    {
+        attr_str[4] = 'A';
+        attrs &= ~FILE_ATTRIBUTE_ARCHIVE;
+    }
+    if (attrs & FILE_ATTRIBUTE_DEVICE)
+    {
+        attr_str[5] = 'd';
+        attrs &= ~FILE_ATTRIBUTE_DEVICE;
+    }
+    if (attrs & FILE_ATTRIBUTE_NORMAL)
+    {
+        attr_str[6] = 'N';
+        attrs &= ~FILE_ATTRIBUTE_NORMAL;
+    }
+    if (attrs & FILE_ATTRIBUTE_TEMPORARY)
+    {
+        attr_str[7] = 'T';
+        attrs &= ~FILE_ATTRIBUTE_TEMPORARY;
+    }
+    if (attrs & FILE_ATTRIBUTE_SPARSE_FILE)
+    {
+        attr_str[8] = 's';
+        attrs &= ~FILE_ATTRIBUTE_SPARSE_FILE;
+    }
+    if (attrs & FILE_ATTRIBUTE_REPARSE_POINT)
+    {
+        attr_str[9] = 'h';
+        attrs &= ~FILE_ATTRIBUTE_REPARSE_POINT;
+    }
+    if (attrs & FILE_ATTRIBUTE_COMPRESSED)
+    {
+        attr_str[10] = 'C';
+        attrs &= ~FILE_ATTRIBUTE_COMPRESSED;
+    }
+    if (attrs & FILE_ATTRIBUTE_OFFLINE)
+    {
+        attr_str[11] = 'O';
+        attrs &= ~FILE_ATTRIBUTE_OFFLINE;
+    }
+    if (attrs & FILE_ATTRIBUTE_NOT_CONTENT_INDEXED)
+    {
+        attr_str[12] = 'i';
+        attrs &= ~FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
+    }
+    if (attrs & FILE_ATTRIBUTE_ENCRYPTED)
+    {
+        attr_str[13] = 'E';
+        attrs &= ~FILE_ATTRIBUTE_ENCRYPTED;
+    }
+    if (attrs & FILE_ATTRIBUTE_INTEGRITY_STREAM)
+    {
+        attr_str[14] = 't';
+        attrs &= ~FILE_ATTRIBUTE_INTEGRITY_STREAM;
+    }
+    if (attrs & FILE_ATTRIBUTE_VIRTUAL)
+    {
+        attr_str[15] = 'V';
+        attrs &= ~FILE_ATTRIBUTE_VIRTUAL;
+    }
+    if (attrs & FILE_ATTRIBUTE_NO_SCRUB_DATA)
+    {
+        attr_str[16] = 'b';
+        attrs &= ~FILE_ATTRIBUTE_NO_SCRUB_DATA;
+    }
+    if (attrs & FILE_ATTRIBUTE_EA)
+    {
+        attr_str[17] = 'a';
+        attrs &= ~FILE_ATTRIBUTE_EA;
+    }
+    if (attrs & FILE_ATTRIBUTE_PINNED)
+    {
+        attr_str[18] = 'P';
+        attrs &= ~FILE_ATTRIBUTE_PINNED;
+    }
+    if (attrs & FILE_ATTRIBUTE_UNPINNED)
+    {
+        attr_str[19] = 'u';
+        attrs &= ~FILE_ATTRIBUTE_UNPINNED;
+    }
+    if (attrs & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+    {
+        attr_str[20] = 'c';
+        attrs &= ~FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
+    }
+    if (attrs & FILE_ATTRIBUTE_RECALL_ON_OPEN)
+    {
+        attr_str[21] = 'o';
+        attrs &= ~FILE_ATTRIBUTE_RECALL_ON_OPEN;
+    }
+    if (attrs & FILE_ATTRIBUTE_STRICTLY_SEQUENTIAL)
+    {
+        attr_str[22] = 'l';
+        attrs &= ~FILE_ATTRIBUTE_STRICTLY_SEQUENTIAL;
+    }
+    if (attrs & FILE_ATTRIBUTE_HAS_MULTIPLE_SITES)
+    {
+        attr_str[22] = (attrs & FILE_ATTRIBUTE_HARDLINK) ? 'L' : '*';
+    }
+    if (attrs)
+    {
+        attr_str[23] = '?';
+        attrs &= ~FILE_ATTRIBUTE_STRICTLY_SEQUENTIAL;
+    }
+    attr_str[24] = 0;
+
+    return attr_str;
+}
+
+const CHAR* FileSize2String(CHAR fsize_str[32], uint64_t filesize)
+{
+    snprintf(fsize_str, 32, "%21I64u", filesize);
+    ASSERT(strnlen(fsize_str, 32) < 32);
+    return fsize_str;
+}
 
 
 // Produce a hash 1..PRIME (NOTE the 1-based number: this makes it easy and fast to detect empty (hash=0) slots!)
@@ -422,7 +564,19 @@ void CloseOutput(void)
             // write filename as UTF8 and check it for sanity while we do:
             char fname[MAX_PATH * 5];
             CvtUTF16ToUTF8(fname, sizeof(fname), slot->path);
-            fprintf(output, "%s\n", fname);
+            if (conciseOutput)
+            {
+                fprintf(output, "%s\n", fname);
+            }
+            else
+            {
+                DWORD attrs = slot->attrs;
+                CHAR attr_str[32];
+
+                FileAttributes2String(attr_str, attrs);
+
+                fprintf(output, "%8lx:%s %21I64u %s\n", (unsigned long)attrs, attr_str, slot->filesize, fname);
+            }
 
             free(slot->path);
         }
@@ -435,7 +589,7 @@ void CloseOutput(void)
 }
 
 
-int TestAndAddInHashtable(const WCHAR* str, HashtableEntry *UniqueFilePaths)
+int TestAndAddInHashtable(const WCHAR* str, const DWORD attrs, uint64_t filesize, HashtableEntry *UniqueFilePaths)
 {
     unsigned int hash = CalculateHash(str);
     unsigned int idx = hash - 1;
@@ -456,6 +610,8 @@ int TestAndAddInHashtable(const WCHAR* str, HashtableEntry *UniqueFilePaths)
     assert(!slot->hash);
     slot->hash = hash;
     slot->path = _wcsdup(str);
+    slot->attrs = attrs;
+    slot->filesize = filesize;
     return 0;                   // 0: not present before, ADDED now!
 }
 
@@ -527,9 +683,12 @@ void ShowProgress(void)
 //--------------------------------------------------------------------
 VOID ProcessFile(WCHAR* FileName, BOOLEAN IsDirectory, DWORD mandatoryAttribs, DWORD wantedAnyAttribs, DWORD rejectedAttribs, BOOLEAN showLinks)
 {
-    DWORD attrs = GetFileAttributes(FileName);
+    WIN32_FILE_ATTRIBUTE_DATA attr_data = { INVALID_FILE_ATTRIBUTES };
+    BOOL rv = GetFileAttributesEx(FileName, GetFileExInfoStandard, &attr_data);
+    DWORD attrs = attr_data.dwFileAttributes;
+    uint64_t filesize = attr_data.nFileSizeLow + (((uint64_t)attr_data.nFileSizeHigh) << 32);
 
-    if (attrs == INVALID_FILE_ATTRIBUTES)
+    if (!rv || attrs == INVALID_FILE_ATTRIBUTES)
     {
         fwprintf(stderr, L"\rError reading attributes of %s:\n", FileName);
         PrintWin32Error(GetLastError());
@@ -571,12 +730,15 @@ VOID ProcessFile(WCHAR* FileName, BOOLEAN IsDirectory, DWORD mandatoryAttribs, D
         if (rejectedLinks && hasLinks)
             return;
 
+        if (hasLinks)
+            attrs |= FILE_ATTRIBUTE_HAS_MULTIPLE_SITES;
+
         // register all links in a hash table, so next time we test, we'll hit 
         // one of those entries and declare that one a "hardlink", UNIX Style.
-        int isHardlink = 0;
+        BOOL isHardlink = FALSE;
         if (hasLinks)
         {
-            if (!TestAndAddInHashtable(FileName, UniqueFilePaths))
+            if (!TestAndAddInHashtable(FileName, attrs, filesize, UniqueFilePaths))
             {
                 WCHAR linkPath[MAX_PATH];
                 WCHAR fullPath[MAX_PATH];
@@ -588,7 +750,7 @@ VOID ProcessFile(WCHAR* FileName, BOOLEAN IsDirectory, DWORD mandatoryAttribs, D
                     {
                         wcsncpy_s(fullPath, FileName, 6);
                         wcsncat_s(fullPath, linkPath, nelem(fullPath));
-                        TestAndAddInHashtable(fullPath, UniqueFilePaths);
+                        TestAndAddInHashtable(fullPath, attrs | FILE_ATTRIBUTE_HARDLINK, filesize, UniqueFilePaths);
                     }
 
                     slen = nelem(linkPath);
@@ -598,7 +760,7 @@ VOID ProcessFile(WCHAR* FileName, BOOLEAN IsDirectory, DWORD mandatoryAttribs, D
                         {
                             wcsncpy_s(fullPath, FileName, 6);
                             wcsncat_s(fullPath, linkPath, nelem(fullPath));
-                            TestAndAddInHashtable(fullPath, UniqueFilePaths);
+                            TestAndAddInHashtable(fullPath, attrs | FILE_ATTRIBUTE_HARDLINK, filesize, UniqueFilePaths);
                         }
                         slen = nelem(linkPath);
                     }
@@ -607,7 +769,9 @@ VOID ProcessFile(WCHAR* FileName, BOOLEAN IsDirectory, DWORD mandatoryAttribs, D
             }
             else
             {
-                isHardlink = 1;
+                isHardlink = TRUE;
+
+                attrs |= FILE_ATTRIBUTE_HARDLINK;
             }
         }
 
@@ -621,153 +785,30 @@ VOID ProcessFile(WCHAR* FileName, BOOLEAN IsDirectory, DWORD mandatoryAttribs, D
 
         FilesMatched++;
 
-        if (!conciseOutput)
+        if (!output)
         {
-            WCHAR    attr_str[32];
+            if (!conciseOutput)
+            {
+                CHAR attr_str[32];
+                CHAR fsize_str[32];
 
-            for (int i = 0; i < 32; i++)
-                attr_str[i] = '.';
+                FileAttributes2String(attr_str, attrs);
+                FileSize2String(fsize_str, filesize);
 
-            if (attrs & FILE_ATTRIBUTE_READONLY)
-            {
-                attr_str[0] = 'R';
-                attrs &= ~FILE_ATTRIBUTE_READONLY;
+                fwprintf(stderr, L"\r");
+                fwprintf(stdout, L"%hs %hs %s\n", attr_str, fsize_str, FileName + 4 /* skip \\?\ prefix */);
             }
-            if (attrs & FILE_ATTRIBUTE_HIDDEN)
+            else
             {
-                attr_str[1] = 'H';
-                attrs &= ~FILE_ATTRIBUTE_HIDDEN;
+                // only dump the file paths to STDOUT in concise mode when NO output file has been specified.
+                fwprintf(stderr, L"\r");
+                fwprintf(stdout, L"%s\n", FileName + 4 /* skip \\?\ prefix */);
             }
-            if (attrs & FILE_ATTRIBUTE_SYSTEM)
-            {
-                attr_str[2] = 'S';
-                attrs &= ~FILE_ATTRIBUTE_SYSTEM;
-            }
-            if (attrs & FILE_ATTRIBUTE_DIRECTORY)
-            {
-                attr_str[3] = 'D';
-                attrs &= ~FILE_ATTRIBUTE_DIRECTORY;
-            }
-            if (attrs & FILE_ATTRIBUTE_ARCHIVE)
-            {
-                attr_str[4] = 'A';
-                attrs &= ~FILE_ATTRIBUTE_ARCHIVE;
-            }
-            if (attrs & FILE_ATTRIBUTE_DEVICE)
-            {
-                attr_str[5] = 'd';
-                attrs &= ~FILE_ATTRIBUTE_DEVICE;
-            }
-            if (attrs & FILE_ATTRIBUTE_NORMAL)
-            {
-                attr_str[6] = 'N';
-                attrs &= ~FILE_ATTRIBUTE_NORMAL;
-            }
-            if (attrs & FILE_ATTRIBUTE_TEMPORARY)
-            {
-                attr_str[7] = 'T';
-                attrs &= ~FILE_ATTRIBUTE_TEMPORARY;
-            }
-            if (attrs & FILE_ATTRIBUTE_SPARSE_FILE)
-            {
-                attr_str[8] = 's';
-                attrs &= ~FILE_ATTRIBUTE_SPARSE_FILE;
-            }
-            if (attrs & FILE_ATTRIBUTE_REPARSE_POINT)
-            {
-                attr_str[9] = 'h';
-                attrs &= ~FILE_ATTRIBUTE_REPARSE_POINT;
-            }
-            if (attrs & FILE_ATTRIBUTE_COMPRESSED)
-            {
-                attr_str[10] = 'C';
-                attrs &= ~FILE_ATTRIBUTE_COMPRESSED;
-            }
-            if (attrs & FILE_ATTRIBUTE_OFFLINE)
-            {
-                attr_str[11] = 'O';
-                attrs &= ~FILE_ATTRIBUTE_OFFLINE;
-            }
-            if (attrs & FILE_ATTRIBUTE_NOT_CONTENT_INDEXED)
-            {
-                attr_str[12] = 'i';
-                attrs &= ~FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
-            }
-            if (attrs & FILE_ATTRIBUTE_ENCRYPTED)
-            {
-                attr_str[13] = 'E';
-                attrs &= ~FILE_ATTRIBUTE_ENCRYPTED;
-            }
-            if (attrs & FILE_ATTRIBUTE_INTEGRITY_STREAM)
-            {
-                attr_str[14] = 't';
-                attrs &= ~FILE_ATTRIBUTE_INTEGRITY_STREAM;
-            }
-            if (attrs & FILE_ATTRIBUTE_VIRTUAL)
-            {
-                attr_str[15] = 'V';
-                attrs &= ~FILE_ATTRIBUTE_VIRTUAL;
-            }
-            if (attrs & FILE_ATTRIBUTE_NO_SCRUB_DATA)
-            {
-                attr_str[16] = 'b';
-                attrs &= ~FILE_ATTRIBUTE_NO_SCRUB_DATA;
-            }
-            if (attrs & FILE_ATTRIBUTE_EA)
-            {
-                attr_str[17] = 'a';
-                attrs &= ~FILE_ATTRIBUTE_EA;
-            }
-            if (attrs & FILE_ATTRIBUTE_PINNED)
-            {
-                attr_str[18] = 'P';
-                attrs &= ~FILE_ATTRIBUTE_PINNED;
-            }
-            if (attrs & FILE_ATTRIBUTE_UNPINNED)
-            {
-                attr_str[19] = 'u';
-                attrs &= ~FILE_ATTRIBUTE_UNPINNED;
-            }
-            if (attrs & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
-            {
-                attr_str[20] = 'c';
-                attrs &= ~FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
-            }
-            if (attrs & FILE_ATTRIBUTE_RECALL_ON_OPEN)
-            {
-                attr_str[21] = 'o';
-                attrs &= ~FILE_ATTRIBUTE_RECALL_ON_OPEN;
-            }
-            if (attrs & FILE_ATTRIBUTE_STRICTLY_SEQUENTIAL)
-            {
-                attr_str[22] = 'l';
-                attrs &= ~FILE_ATTRIBUTE_STRICTLY_SEQUENTIAL;
-            }
-            if (hasLinks)
-            {
-                attr_str[22] = isHardlink ? 'L' : '*';
-            }
-            if (attrs)
-            {
-                attr_str[23] = '?';
-                attrs &= ~FILE_ATTRIBUTE_STRICTLY_SEQUENTIAL;
-            }
-            attr_str[24] = 0;
-
-            fwprintf(stderr, L"\r");
-            fwprintf(stdout, L"%s %s\n", attr_str, FileName + 4 /* skip \\?\ prefix */);
         }
-        else if (!output)
-        {
-            // only dump the file paths to STDOUT in concise mode when NO output file has been specified.
-            fwprintf(stderr, L"\r");
-            fwprintf(stdout, L"%s\n", FileName + 4 /* skip \\?\ prefix */);
-        }
-
-        if (output)
+        else
         {
             // register filename in the OUTPUT hash table when we're going to output it 'unordered' to output file.
-            TestAndAddInHashtable(FileName + 4 /* skip \\?\ prefix */, OutputFilePaths);
+            TestAndAddInHashtable(FileName + 4 /* skip \\?\ prefix */, attrs, filesize, OutputFilePaths);
         }
     }
 
