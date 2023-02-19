@@ -49,6 +49,7 @@ FILE* output = NULL;
 CPINFOEXW CPInfo = { 0 };
 int cvtErrors = 0;
 int conciseOutput = 0;
+int quiet = 0;
 ULONG FilesMatched = 0;
 ULONG DotsPrinted = 0;
 BOOLEAN PrintDirectoryOpenErrors = FALSE;
@@ -536,7 +537,7 @@ void CvtUTF16ToUTF8(char* dst, size_t dstlen, const WCHAR* src)
     }
     
     dst[0] = 0;
-    int rv = WideCharToMultiByte(CP_UTF8, WC_NO_BEST_FIT_CHARS, src, -1, dst, dstlen, NULL, NULL);
+    int rv = WideCharToMultiByte(CP_UTF8, WC_NO_BEST_FIT_CHARS, src, -1, dst, (int)dstlen, NULL, NULL);
     dst[dstlen - 1] = 0;
     if (rv == 0)
     {
@@ -640,7 +641,7 @@ BOOL FileHasMultipleInstances(WCHAR* FileName)
 
 void ClearProgress(void)
 {
-    if (!conciseOutput)
+    if (!conciseOutput && !quiet)
     {
         fwprintf(stderr, L"\r     \r");
         DotsPrinted = 0;
@@ -650,7 +651,7 @@ void ClearProgress(void)
 
 void ShowProgress(void)
 {
-    if (!conciseOutput)
+    if (!conciseOutput && !quiet)
     {
         clock_t t2 = clock();
 
@@ -1077,12 +1078,13 @@ int Usage(WCHAR* ProgramName)
     else
         baseName++;
 
-    fwprintf(stderr, L"\nDirScanner v1.1 - List directory contents including NTFS hardlinks\n");
-    fwprintf(stderr, L"Copyright (C) 2021 Ger Hobbelt\n");
+    fwprintf(stderr, L"\nDirScanner v1.2 - List directory contents including NTFS hardlinks\n");
+    fwprintf(stderr, L"Copyright (C) 2021-2023 Ger Hobbelt\n");
     fwprintf(stderr, L"Some parts Copyright (C) 1999-2005 Mark Russinovich\n");
 
     fwprintf(stderr, L"usage: %s [-s] [-m mask] [-r mask] [-w mask] [-o file] <file or directory> ...\n", baseName);
     fwprintf(stderr, L"-c     Concise output, i.e. do NOT print the attributes\n");
+    fwprintf(stderr, L"-q     Quiet mode: no progress, no info lines\n");
     fwprintf(stderr, L"-s     Recurse subdirectories\n");
     fwprintf(stderr, L"-m     mask of attributes which are Mandatory (MUST HAVE)\n");
     fwprintf(stderr, L"-w     mask of attributes which are Wanted (MAY HAVE)\n");
@@ -1194,10 +1196,13 @@ int wmain(int argc, WCHAR* argv[])
     // Order of appearancee is important, hence you can specify different attribute mask filters
     // for different search paths!
 
-    if (argv[argc - 1][0] == L'/' || argv[argc - 1][0] == L'-')
     {
-        fwprintf(stderr, L"Unused commandline parameters at the end of your commandline. Please clean up: %s\n", argv[argc - 1]);
-        return Usage(argv[0]);
+        auto last_arg = argv[argc - 1];
+        if ((last_arg[0] == L'/' || last_arg[0] == L'-') && last_arg[2] == 0)
+        {
+            fwprintf(stderr, L"Unused commandline parameters at the end of your commandline. Please clean up: %s\n", last_arg);
+            return Usage(argv[0]);
+        }
     }
 
     memset(UniqueFilePaths, 0, sizeof(UniqueFilePaths));
@@ -1208,101 +1213,125 @@ int wmain(int argc, WCHAR* argv[])
 
     for (i = 1; i < argc; i++)
     {
-        if (argv[i][0] != L'/' && argv[i][0] != L'-')
-        {
-            // https://docs.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
-            wcsncpy_s(searchPath, L"\\\\?\\", 4);
-            PWCHAR filePart;
-            GetFullPathName(argv[i], MAX_PATH - 4, searchPath + 4, &filePart);
-            NormalizePathSeparators(searchPath);
+        auto opt = argv[i];
 
-            //
-            // Check that it's a NTFS volume and report limited abilities when it's not
-            //
-            if (searchPath[1] == L':')
+        // only match '/X' and '-X' options; the rest is search paths:
+        if ((opt[0] == L'/' || opt[0] == L'-') && opt[2] == 0)
+        {
+            if (opt[1] == L'c' || opt[1] == L'C')
             {
-                fsFlags = 0;
-                WCHAR volume[] = L"C:\\";
-                volume[0] = searchPath[0];
-                GetVolumeInformation(volume, NULL, 0, NULL, NULL, &fsFlags, NULL, 0);
-                if (!(fsFlags & FILE_SUPPORTS_HARD_LINKS))
+                conciseOutput = TRUE;
+            }
+            else if (opt[1] == L's' || opt[1] == L'S')
+            {
+                recurse = TRUE;
+            }
+            else if (opt[1] == L'l' || opt[1] == L'L')
+            {
+                showLinks = TRUE;
+            }
+            else if (opt[1] == L'q' || opt[1] == L'Q')
+            {
+                quiet = TRUE;
+            }
+            else if (opt[1] == L'm' || opt[1] == 'M')
+            {
+                i++;
+                mandatoryAttribs = ParseMask(argv[i]);
+            }
+            else if (opt[1] == L'w' || opt[1] == 'W')
+            {
+                i++;
+                wantedAnyAttribs = ParseMask(argv[i]);
+            }
+            else if (opt[1] == L'r' || opt[1] == 'R')
+            {
+                i++;
+                rejectedAttribs = ParseMask(argv[i]);
+            }
+            else if (opt[1] == L'o' || opt[1] == 'O')
+            {
+                CloseOutput();
+
+                i++;
+                wcscpy_s(listOutputPath, argv[i]);
+                NormalizePathSeparators(listOutputPath);
+
+                char fname[MAX_PATH * 5];
+                CvtUTF16ToUTF8(fname, sizeof(fname), listOutputPath);
+                errno_t err = fopen_s(&output, fname, "w");
+                if (!output || err)
                 {
-                    fwprintf(stderr, L"\nWARNING: The specified volume %s does not support Windows/NTFS hardlinks. We won't be able to find any of those then!\n\n", volume);
-                    // ignore this inability, so we can scan network drives, etc. anyway.
+                    char msg[1024];
+                    strerror_s(msg, errno);
+                    fwprintf(stderr, L"Unable to open file '%s' for writing: ", listOutputPath);
+                    fprintf(stderr, "%s.\n\n", msg);
+                    return EXIT_FAILURE;
                 }
             }
-            else if (searchPath[4 + 1] == L':')
+            else
             {
-                // User very probably specified a '\\?\D:\...' UNC path. Check the drive letter in there.
-                fsFlags = 0;
-                WCHAR volume[] = L"C:\\";
-                volume[0] = searchPath[4];
-                GetVolumeInformation(volume, NULL, 0, NULL, NULL, &fsFlags, NULL, 0);
-                if (!(fsFlags & FILE_SUPPORTS_HARD_LINKS))
-                {
-                    fwprintf(stderr, L"\nWARNING: The specified volume %s does not support Windows/NTFS hardlinks. We won't be able to find any of those then!\n\n", volume);
-                    // ignore this inability, so we can scan network drives, etc. anyway.
-                }
+                fwprintf(stderr, L"Unrecognized commandline argument: %s\n\n", opt);
+                return Usage(argv[0]);
             }
 
-            //
-            // Now go and process directories
-            //
-            searchPattern[0] = 0;           // signal initial call of this recursive function
-            ProcessDirectory(searchPath, searchPattern, nelem(searchPattern), recurse, mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks);
+            continue;
         }
-        else if (argv[i][1] == L'c' || argv[i][1] == L'C')
-        {
-            conciseOutput = TRUE;
-        }
-        else if (argv[i][1] == L's' || argv[i][1] == L'S')
-        {
-            recurse = TRUE;
-        }
-        else if (argv[i][1] == L'l' || argv[i][1] == L'L')
-        {
-            showLinks = TRUE;
-        }
-        else if (argv[i][1] == L'm' || argv[i][1] == 'M')
-        {
-            i++;
-            mandatoryAttribs = ParseMask(argv[i]);
-        }
-        else if (argv[i][1] == L'w' || argv[i][1] == 'W')
-        {
-            i++;
-            wantedAnyAttribs = ParseMask(argv[i]);
-        }
-        else if (argv[i][1] == L'r' || argv[i][1] == 'R')
-        {
-            i++;
-            rejectedAttribs = ParseMask(argv[i]);
-        }
-        else if (argv[i][1] == L'o' || argv[i][1] == 'O')
-        {
-            CloseOutput();
 
-            i++;
-            wcscpy_s(listOutputPath, argv[i]);
-            NormalizePathSeparators(listOutputPath);
-
-            char fname[MAX_PATH * 5];
-            CvtUTF16ToUTF8(fname, sizeof(fname), listOutputPath);
-            errno_t err = fopen_s(&output, fname, "w");
-            if (!output || err)
-            {
-                char msg[1024];
-                strerror_s(msg, errno);
-                fwprintf(stderr, L"Unable to open file '%s' for writing: ", listOutputPath);
-                fprintf(stderr, "%s.\n\n", msg);
-                return EXIT_FAILURE;
-            }
+        // https://docs.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
+        wcsncpy_s(searchPath, L"\\\\?\\", 4);
+        PWCHAR filePart;
+        GetFullPathName(argv[i], MAX_PATH - 4, searchPath + 4, &filePart);
+        NormalizePathSeparators(searchPath + 4);
+        if (wcsncmp(searchPath + 4, L"\\\\?\\", 4) == 0)
+        {
+            // user specified UNC path!
+            memmove(searchPath, searchPath + 4, (wcslen(searchPath + 4) + 1) * sizeof(searchPath[0]));
         }
         else
         {
-            fwprintf(stderr, L"Unrecognized commandline argument: %s\n\n", argv[i]);
-            return Usage(argv[0]);
+            NormalizePathSeparators(searchPath);
         }
+
+        if (!quiet)
+        {
+            fwprintf(stderr, L"Scanning: %s\n", searchPath);
+        }
+
+        //
+        // Check that it's a NTFS volume and report limited abilities when it's not
+        //
+        if (searchPath[1] == L':')
+        {
+            fsFlags = 0;
+            WCHAR volume[] = L"C:\\";
+            volume[0] = searchPath[0];
+            GetVolumeInformation(volume, NULL, 0, NULL, NULL, &fsFlags, NULL, 0);
+            if (!(fsFlags & FILE_SUPPORTS_HARD_LINKS))
+            {
+                fwprintf(stderr, L"\nWARNING: The specified volume %s does not support Windows/NTFS hardlinks. We won't be able to find any of those then!\n\n", volume);
+                // ignore this inability, so we can scan network drives, etc. anyway.
+            }
+        }
+        else if (searchPath[4 + 1] == L':')
+        {
+            // User very probably specified a '\\?\D:\...' UNC path. Check the drive letter in there.
+            fsFlags = 0;
+            WCHAR volume[] = L"C:\\";
+            volume[0] = searchPath[4];
+            GetVolumeInformation(volume, NULL, 0, NULL, NULL, &fsFlags, NULL, 0);
+            if (!(fsFlags & FILE_SUPPORTS_HARD_LINKS))
+            {
+                fwprintf(stderr, L"\nWARNING: The specified volume %s does not support Windows/NTFS hardlinks. We won't be able to find any of those then!\n\n", volume);
+                // ignore this inability, so we can scan network drives, etc. anyway.
+            }
+        }
+
+        //
+        // Now go and process directories
+        //
+        searchPattern[0] = 0;           // signal initial call of this recursive function
+        ProcessDirectory(searchPath, searchPattern, nelem(searchPattern), recurse, mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks);
     }
 
     CloseOutput();
@@ -1311,6 +1340,12 @@ int wmain(int argc, WCHAR* argv[])
     ClearProgress();
 
     if (!FilesMatched)
-        fwprintf(stderr, L"\rNo matching files found.\n\n");
+    {
+        if (!quiet)
+        {
+            fwprintf(stderr, L"\rNo matching files found.\n\n");
+        }
+    }
+
     return 0;
 }
