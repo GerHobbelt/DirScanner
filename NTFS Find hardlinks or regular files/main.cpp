@@ -1213,7 +1213,7 @@ int wmain(int argc, WCHAR* argv[])
             // https://docs.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
             wcsncpy_s(searchPath, L"\\\\?\\", 4);
             PWCHAR filePart;
-            GetFullPathName(argv[argc - 1], MAX_PATH - 4, searchPath + 4, &filePart);
+            GetFullPathName(argv[i], MAX_PATH - 4, searchPath + 4, &filePart);
             NormalizePathSeparators(searchPath);
 
             //
