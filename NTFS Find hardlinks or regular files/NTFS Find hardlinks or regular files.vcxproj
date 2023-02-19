@@ -108,7 +108,8 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y "$(TargetDir)$(TargetFileName)" "$(ProjectDir)../../libs"</Command>
+      <Command>echo "copying $(TargetFileName) to:    $(ProjectDir)../../../libs"
+copy /Y "$(TargetDir)$(TargetFileName)" "$(ProjectDir)../../../libs"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -129,7 +130,8 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y "$(TargetDir)$(TargetFileName)" "$(ProjectDir)../../libs"</Command>
+      <Command>echo "copying $(TargetFileName) to:    $(ProjectDir)../../../libs"
+copy /Y "$(TargetDir)$(TargetFileName)" "$(ProjectDir)../../../libs"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -146,7 +148,8 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y "$(TargetDir)$(TargetFileName)" "$(ProjectDir)../../libs"</Command>
+      <Command>echo "copying $(TargetFileName) to:    $(ProjectDir)../../../libs"
+copy /Y "$(TargetDir)$(TargetFileName)" "$(ProjectDir)../../../libs"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -167,7 +170,8 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y "$(TargetDir)$(TargetFileName)" "$(ProjectDir)../../libs"</Command>
+      <Command>echo "copying $(TargetFileName) to:    $(ProjectDir)../../../libs"
+copy /Y "$(TargetDir)$(TargetFileName)" "$(ProjectDir)../../../libs"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
