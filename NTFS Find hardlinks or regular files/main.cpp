@@ -1,16 +1,26 @@
 ﻿#define UNICODE 1
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
 #include <windows.h>
 #include <stdio.h>
 #include <inttypes.h>
 #include <string.h>
 #include <time.h>       /* clock_t, clock, CLOCKS_PER_SEC */
+#include <algorithm>
 #include <assert.h>
 
 #include "ntfs_ads_io.h"
 
+#undef max
+#undef min
+
 // Make sure we support Long Paths:
+#if defined(MAX_PATH) && MAX_PATH > 1500
+#error "Bump our Large-File-Names-MAX_PATH replacement define at the line further below!"
+#endif
 #undef MAX_PATH
-#define MAX_PATH 1500
+#define MAX_PATH     1500
 
 #define ASSERT(t)                       \
     if (!(t))                           \
@@ -25,8 +35,9 @@ static RtlNtStatusToDosError_f RtlNtStatusToDosError;
 
 
 // hack: unused attributes bits used by us to signal hardlinks are present
-#define FILE_ATTRIBUTE_HAS_MULTIPLE_SITES  0x80000000U
-#define FILE_ATTRIBUTE_HARDLINK            0x40000000U
+#define FILE_ATTRIBUTE_HAS_MULTIPLE_SITES  ((DWORD)0x400000000U)
+#define FILE_ATTRIBUTE_HARDLINK            ((DWORD)0x200000000U)
+#define FILE_ATTRIBUTE_HAS_ADS             ((DWORD)0x100000000U)
 
 
 #define PRIME_MODULUS    16769023
@@ -285,6 +296,10 @@ DWORD ParseMask(WCHAR* mask)
             attrs |= FILE_ATTRIBUTE_HARDLINK;
             break;
 
+		case 'z':
+			attrs |= FILE_ATTRIBUTE_HAS_ADS;
+			break;
+
         case 'M':
         case '?':
             attrs |= ~(0
@@ -313,7 +328,8 @@ DWORD ParseMask(WCHAR* mask)
                 | FILE_ATTRIBUTE_STRICTLY_SEQUENTIAL
                 | FILE_ATTRIBUTE_HAS_MULTIPLE_SITES
                 | FILE_ATTRIBUTE_HARDLINK
-                );
+				| FILE_ATTRIBUTE_HAS_ADS
+				);
             break;
 
         default:
@@ -331,134 +347,39 @@ DWORD ParseMask(WCHAR* mask)
 
 const CHAR *FileAttributes2String(CHAR attr_str[32], DWORD attrs)
 {
-    for (int i = 0; i < 32; i++)
-        attr_str[i] = '.';
+	CHAR *s = attr_str;
 
-    if (attrs & FILE_ATTRIBUTE_READONLY)
-    {
-        attr_str[0] = 'R';
-        attrs &= ~FILE_ATTRIBUTE_READONLY;
-    }
-    if (attrs & FILE_ATTRIBUTE_HIDDEN)
-    {
-        attr_str[1] = 'H';
-        attrs &= ~FILE_ATTRIBUTE_HIDDEN;
-    }
-    if (attrs & FILE_ATTRIBUTE_SYSTEM)
-    {
-        attr_str[2] = 'S';
-        attrs &= ~FILE_ATTRIBUTE_SYSTEM;
-    }
-    if (attrs & FILE_ATTRIBUTE_DIRECTORY)
-    {
-        attr_str[3] = 'D';
-        attrs &= ~FILE_ATTRIBUTE_DIRECTORY;
-    }
-    if (attrs & FILE_ATTRIBUTE_ARCHIVE)
-    {
-        attr_str[4] = 'A';
-        attrs &= ~FILE_ATTRIBUTE_ARCHIVE;
-    }
-    if (attrs & FILE_ATTRIBUTE_DEVICE)
-    {
-        attr_str[5] = 'd';
-        attrs &= ~FILE_ATTRIBUTE_DEVICE;
-    }
-    if (attrs & FILE_ATTRIBUTE_NORMAL)
-    {
-        attr_str[6] = 'N';
-        attrs &= ~FILE_ATTRIBUTE_NORMAL;
-    }
-    if (attrs & FILE_ATTRIBUTE_TEMPORARY)
-    {
-        attr_str[7] = 'T';
-        attrs &= ~FILE_ATTRIBUTE_TEMPORARY;
-    }
-    if (attrs & FILE_ATTRIBUTE_SPARSE_FILE)
-    {
-        attr_str[8] = 's';
-        attrs &= ~FILE_ATTRIBUTE_SPARSE_FILE;
-    }
-    if (attrs & FILE_ATTRIBUTE_REPARSE_POINT)
-    {
-        attr_str[9] = 'h';
-        attrs &= ~FILE_ATTRIBUTE_REPARSE_POINT;
-    }
-    if (attrs & FILE_ATTRIBUTE_COMPRESSED)
-    {
-        attr_str[10] = 'C';
-        attrs &= ~FILE_ATTRIBUTE_COMPRESSED;
-    }
-    if (attrs & FILE_ATTRIBUTE_OFFLINE)
-    {
-        attr_str[11] = 'O';
-        attrs &= ~FILE_ATTRIBUTE_OFFLINE;
-    }
-    if (attrs & FILE_ATTRIBUTE_NOT_CONTENT_INDEXED)
-    {
-        attr_str[12] = 'i';
-        attrs &= ~FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
-    }
-    if (attrs & FILE_ATTRIBUTE_ENCRYPTED)
-    {
-        attr_str[13] = 'E';
-        attrs &= ~FILE_ATTRIBUTE_ENCRYPTED;
-    }
-    if (attrs & FILE_ATTRIBUTE_INTEGRITY_STREAM)
-    {
-        attr_str[14] = 't';
-        attrs &= ~FILE_ATTRIBUTE_INTEGRITY_STREAM;
-    }
-    if (attrs & FILE_ATTRIBUTE_VIRTUAL)
-    {
-        attr_str[15] = 'V';
-        attrs &= ~FILE_ATTRIBUTE_VIRTUAL;
-    }
-    if (attrs & FILE_ATTRIBUTE_NO_SCRUB_DATA)
-    {
-        attr_str[16] = 'b';
-        attrs &= ~FILE_ATTRIBUTE_NO_SCRUB_DATA;
-    }
-    if (attrs & FILE_ATTRIBUTE_EA)
-    {
-        attr_str[17] = 'a';
-        attrs &= ~FILE_ATTRIBUTE_EA;
-    }
-    if (attrs & FILE_ATTRIBUTE_PINNED)
-    {
-        attr_str[18] = 'P';
-        attrs &= ~FILE_ATTRIBUTE_PINNED;
-    }
-    if (attrs & FILE_ATTRIBUTE_UNPINNED)
-    {
-        attr_str[19] = 'u';
-        attrs &= ~FILE_ATTRIBUTE_UNPINNED;
-    }
-    if (attrs & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
-    {
-        attr_str[20] = 'c';
-        attrs &= ~FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
-    }
-    if (attrs & FILE_ATTRIBUTE_RECALL_ON_OPEN)
-    {
-        attr_str[21] = 'o';
-        attrs &= ~FILE_ATTRIBUTE_RECALL_ON_OPEN;
-    }
-    if (attrs & FILE_ATTRIBUTE_STRICTLY_SEQUENTIAL)
-    {
-        attr_str[22] = 'l';
-        attrs &= ~FILE_ATTRIBUTE_STRICTLY_SEQUENTIAL;
-    }
-    if (attrs & FILE_ATTRIBUTE_HAS_MULTIPLE_SITES)
-    {
-        attr_str[22] = (attrs & FILE_ATTRIBUTE_HARDLINK) ? 'L' : '*';
-    }
-    if (attrs)
-    {
-        attr_str[23] = '?';
-        attrs &= ~FILE_ATTRIBUTE_STRICTLY_SEQUENTIAL;
-    }
-    attr_str[24] = 0;
+#define MARK(flag, marker)										\
+	*s++ = ((attrs & (flag)) ? (marker) : '.');                 \
+	attrs &= ~(flag);
+
+	MARK(FILE_ATTRIBUTE_READONLY, 'R');
+	MARK(FILE_ATTRIBUTE_HIDDEN, 'H');
+	MARK(FILE_ATTRIBUTE_SYSTEM, 'S');
+	MARK(FILE_ATTRIBUTE_DIRECTORY, 'D');
+	MARK(FILE_ATTRIBUTE_ARCHIVE, 'A');
+	MARK(FILE_ATTRIBUTE_DEVICE, 'd');
+	MARK(FILE_ATTRIBUTE_NORMAL, 'N');
+	MARK(FILE_ATTRIBUTE_TEMPORARY, 'T');
+	MARK(FILE_ATTRIBUTE_SPARSE_FILE, 's');
+	MARK(FILE_ATTRIBUTE_REPARSE_POINT, 'h');
+	MARK(FILE_ATTRIBUTE_COMPRESSED, 'C');
+	MARK(FILE_ATTRIBUTE_OFFLINE, 'O');
+	MARK(FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, 'i');
+	MARK(FILE_ATTRIBUTE_ENCRYPTED, 'E');
+	MARK(FILE_ATTRIBUTE_INTEGRITY_STREAM, 't');
+	MARK(FILE_ATTRIBUTE_VIRTUAL, 'V');
+	MARK(FILE_ATTRIBUTE_NO_SCRUB_DATA, 'b');
+	MARK(FILE_ATTRIBUTE_EA, 'a');
+	MARK(FILE_ATTRIBUTE_PINNED, 'P');
+	MARK(FILE_ATTRIBUTE_UNPINNED, 'u');
+	MARK(FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, 'c');
+	MARK(FILE_ATTRIBUTE_RECALL_ON_OPEN, 'o');
+	MARK(FILE_ATTRIBUTE_STRICTLY_SEQUENTIAL, 'l');
+	MARK(FILE_ATTRIBUTE_HAS_MULTIPLE_SITES | FILE_ATTRIBUTE_HARDLINK, (attrs & FILE_ATTRIBUTE_HARDLINK) ? 'L' : '*');
+	MARK(FILE_ATTRIBUTE_HAS_ADS, 'Z');
+	MARK(~0, '?');		// catch-all for any remaining, unknown flags
+    *s = 0;
 
     return attr_str;
 }
@@ -468,6 +389,26 @@ const CHAR* FileSize2String(CHAR fsize_str[32], uint64_t filesize)
     snprintf(fsize_str, 32, "%21I64u", filesize);
     ASSERT(strnlen(fsize_str, 32) < 32);
     return fsize_str;
+}
+
+const CHAR* FileTime2String(CHAR fsize_str[32], FILETIME timestamp)
+{
+	FILETIME localtime;
+	SYSTEMTIME tm;
+	// use local time: this ensures the date&time shown matches the timestamp shown in Windows Explorer.
+	if (FileTimeToLocalFileTime(&timestamp, &localtime) &&
+	    FileTimeToSystemTime(&localtime, &tm))
+	{
+		snprintf(fsize_str, 32, "%04u-%02u-%02uT%02u:%02u:%02u.%04u", tm.wYear, tm.wMonth, tm.wDay, tm.wHour, tm.wMinute, tm.wSecond, tm.wMilliseconds);
+		ASSERT(strnlen(fsize_str, 32) < 32);
+		return fsize_str;
+	}
+	else
+	{
+		strcpy(fsize_str, "---INVALID-TIMESTAMP---");
+		ASSERT(strnlen(fsize_str, 32) < 32);
+		return fsize_str;
+	}
 }
 
 
@@ -563,7 +504,7 @@ void CloseOutput(void)
             ASSERT(slot->path != NULL);
 
             // write filename as UTF8 and check it for sanity while we do:
-            char fname[MAX_PATH * 5];
+            char fname[MAX_PATH + 1];
             CvtUTF16ToUTF8(fname, sizeof(fname), slot->path);
             if (conciseOutput)
             {
@@ -619,7 +560,7 @@ int TestAndAddInHashtable(const WCHAR* str, const DWORD attrs, uint64_t filesize
 
 
 // Return TRUE when file is hardlinked at least once, i.e. has two paths on the disk AT LEAST.
-BOOL FileHasMultipleInstances(WCHAR* FileName)
+BOOL FileHasMultipleInstances(const WCHAR* FileName)
 {
     WCHAR linkPath[MAX_PATH];
     int linkCount = 0;
@@ -635,6 +576,162 @@ BOOL FileHasMultipleInstances(WCHAR* FileName)
         FindClose(fnameHandle);
     }
     return !!linkCount;
+}
+
+
+struct ADS_CHECK_REPORTDATA {
+	PFILE_STREAM_INFORMATION streamInfo {nullptr};
+	ULONG streamInfoSize				{0};
+	unsigned int additionalStreamCount  {0};
+	BOOLEAN hasOpenError                {FALSE};
+	DWORD error                         {ERROR_SUCCESS};
+	WCHAR errorMessage[MAX_PATH + 2000] {0};
+
+	~ADS_CHECK_REPORTDATA() 
+	{
+		if (streamInfo)
+			free(streamInfo);
+	}
+
+	BOOL producedAnError()
+	{
+		return error != ERROR_SUCCESS;
+	}
+};
+
+
+// Return TRUE when file has *any* ADS (Alternative Data Streams); hence we need not look any further than a streams list that's longer than just basic/fundamental `::$DATA`.
+BOOL FileHasADS(const WCHAR* FileName, ADS_CHECK_REPORTDATA &report)
+{
+	//--------------------------------------------------------------------
+	//
+	// ProcessFile
+	//
+	// Queries a file to obtain stream information.
+	//
+	//--------------------------------------------------------------------
+	HANDLE   fileHandle;
+
+	//
+	// Open the file
+	//
+	fileHandle = CreateFile(FileName, GENERIC_READ,
+		FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+		OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS, 0);
+	if (fileHandle == INVALID_HANDLE_VALUE)
+	{
+		report.hasOpenError = TRUE;
+		swprintf(report.errorMessage, nelem(report.errorMessage), L"Error opening \"%s\" for reading ADS info", FileName);
+		report.error = GetLastError();
+		ASSERT(report.error != ERROR_SUCCESS);
+	}
+	else
+	{
+		// + https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntqueryinformationfile
+		// + https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_stream_information
+		IO_STATUS_BLOCK ioStatus = { 0 };
+		NTSTATUS status = ERROR_SUCCESS;
+		unsigned int count = 0;
+
+		ULONG streamInfoSize = 512;
+		PFILE_STREAM_INFORMATION streamInfo = (PFILE_STREAM_INFORMATION)malloc(streamInfoSize);
+		if (streamInfo == nullptr)
+		{
+			swprintf(report.errorMessage, nelem(report.errorMessage), L"ERROR: Out of memory while allocating %lu bytes space for file stream info while inpecting \"%s\"", streamInfoSize, FileName);
+			report.error = GetLastError();
+			ASSERT(report.error != ERROR_SUCCESS);
+			status = ERROR_NOT_ENOUGH_MEMORY | ERROR_SEVERITY_ERROR | APPLICATION_ERROR_MASK;
+		}
+
+		while (streamInfo != nullptr)
+		{
+			memset(&ioStatus, 0, sizeof(ioStatus));
+			memset(streamInfo, 0, streamInfoSize);
+			status = NtQueryInformationFile(fileHandle, &ioStatus,
+				streamInfo, streamInfoSize,
+				FileStreamInformation);
+			if (status == STATUS_BUFFER_OVERFLOW)
+			{
+				free(streamInfo);
+				streamInfoSize += 16384;
+				streamInfo = (PFILE_STREAM_INFORMATION)malloc(streamInfoSize);
+				if (streamInfo == nullptr)
+				{
+					swprintf(report.errorMessage, nelem(report.errorMessage), L"ERROR: Out of memory while allocating %lu bytes space for file stream info while inpecting \"%s\"", streamInfoSize, FileName);
+					report.error = GetLastError();
+					ASSERT(report.error != ERROR_SUCCESS);
+					status = ERROR_NOT_ENOUGH_MEMORY | ERROR_SEVERITY_ERROR | APPLICATION_ERROR_MASK;
+				}
+			}
+			else
+			{
+				break;
+			}
+		}
+
+		//
+		// If success, dump the contents
+		//
+		if (NT_SUCCESS(status) && ioStatus.Information)
+		{
+			PFILE_STREAM_INFORMATION streamInfoPtr = streamInfo;
+			ULONG actualInfoSize = (ULONG)ioStatus.Information;
+			ASSERT(ioStatus.Information < (ULONG_PTR)(~(ULONG)0));
+			PFILE_STREAM_INFORMATION streamInfoPtrEOF = (PFILE_STREAM_INFORMATION)(((BYTE *)streamInfo) + actualInfoSize);
+			WCHAR streamName[MAX_PATH + 1];
+
+			while (streamInfoPtr < streamInfoPtrEOF)
+			{
+				ULONG nameLen = std::min((ULONG)sizeof(streamName), streamInfoPtr->StreamNameLength);
+				if (streamInfoPtr->StreamNameLength > 0)
+				{
+					ASSERT(streamInfoPtr->StreamNameLength == nameLen);
+					memcpy(streamName, streamInfoPtr->StreamName, nameLen);
+				}
+				streamName[nameLen / 2] = 0;
+
+				//
+				// Skip the standard Data stream
+				//
+				if (_wcsicmp(streamName, L"::$DATA"))
+				{
+					count++;
+				}
+
+				if (streamInfoPtr->NextEntryOffset == 0)
+					break;
+
+				streamInfoPtr = (PFILE_STREAM_INFORMATION)((BYTE *)streamInfoPtr + streamInfoPtr->NextEntryOffset);
+			}
+
+			report.additionalStreamCount = count;
+			report.streamInfo = streamInfo;
+			report.streamInfoSize = actualInfoSize;
+
+			// prevent streamInfo from being freed prematurely below: caller will want to peruse it!
+			streamInfo = nullptr;
+		}
+		else if (!NT_SUCCESS(status) && status != (ERROR_NOT_ENOUGH_MEMORY | ERROR_SEVERITY_ERROR | APPLICATION_ERROR_MASK) /* this one will already have been reported */ )
+		{
+			swprintf(report.errorMessage, nelem(report.errorMessage), L"Error while inspecting \"%s\"", FileName);
+			report.error = RtlNtStatusToDosError(status);
+		}
+		free(streamInfo);
+		CloseHandle(fileHandle);
+
+		if ((report.streamInfo == nullptr || report.streamInfoSize == 0) && !report.producedAnError())
+		{
+			report.error = E_UNEXPECTED;
+		}
+	}
+
+	if ((report.streamInfo == nullptr || report.streamInfoSize == 0) && !report.producedAnError())
+	{
+		report.error = E_UNEXPECTED;
+	}
+
+	return (report.additionalStreamCount > 0);
 }
 
 
@@ -682,12 +779,15 @@ void ShowProgress(void)
 // Queries a file to obtain stream information.
 //
 //--------------------------------------------------------------------
-VOID ProcessFile(WCHAR* FileName, BOOLEAN IsDirectory, DWORD mandatoryAttribs, DWORD wantedAnyAttribs, DWORD rejectedAttribs, BOOLEAN showLinks)
+VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDirectory, DWORD mandatoryAttribs, DWORD wantedAnyAttribs, DWORD rejectedAttribs, BOOLEAN showLinks, int showADS)
 {
     WIN32_FILE_ATTRIBUTE_DATA attr_data = { INVALID_FILE_ATTRIBUTES };
     BOOL rv = GetFileAttributesEx(FileName, GetFileExInfoStandard, &attr_data);
     DWORD attrs = attr_data.dwFileAttributes;
     uint64_t filesize = attr_data.nFileSizeLow + (((uint64_t)attr_data.nFileSizeHigh) << 32);
+	ASSERT(attrs == foundFile.dwFileAttributes);
+	uint64_t filesize2 = foundFile.nFileSizeLow + (((uint64_t)foundFile.nFileSizeHigh) << 32);
+	ASSERT(filesize == filesize2);
 
     if (!rv || attrs == INVALID_FILE_ATTRIBUTES)
     {
@@ -700,17 +800,21 @@ VOID ProcessFile(WCHAR* FileName, BOOLEAN IsDirectory, DWORD mandatoryAttribs, D
         // Then, after we've done that, we go in and scan the filesystem to see if the file has hardlinks
         // and we filter on THAT.
 
-        int mandatoryLinks = !!(mandatoryAttribs & FILE_ATTRIBUTE_HAS_MULTIPLE_SITES);
-        int wantedLinks = !!(wantedAnyAttribs & FILE_ATTRIBUTE_HAS_MULTIPLE_SITES);
-        int rejectedLinks = !!(rejectedAttribs & FILE_ATTRIBUTE_HAS_MULTIPLE_SITES);
+		BOOL mandatoryLinks = !!(mandatoryAttribs & FILE_ATTRIBUTE_HAS_MULTIPLE_SITES);
+		BOOL wantedLinks = !!(wantedAnyAttribs & FILE_ATTRIBUTE_HAS_MULTIPLE_SITES);
+		BOOL rejectedLinks = !!(rejectedAttribs & FILE_ATTRIBUTE_HAS_MULTIPLE_SITES);
 
-        int mandatoryHardLink = !!(mandatoryAttribs & FILE_ATTRIBUTE_HARDLINK);
-        int wantedHardLink = !!(wantedAnyAttribs & FILE_ATTRIBUTE_HARDLINK);
-        int rejectedHardLink = !!(rejectedAttribs & FILE_ATTRIBUTE_HARDLINK);
+		BOOL mandatoryHardLink = !!(mandatoryAttribs & FILE_ATTRIBUTE_HARDLINK);
+		BOOL wantedHardLink = !!(wantedAnyAttribs & FILE_ATTRIBUTE_HARDLINK);
+		BOOL rejectedHardLink = !!(rejectedAttribs & FILE_ATTRIBUTE_HARDLINK);
 
-        mandatoryAttribs &= ~(FILE_ATTRIBUTE_HAS_MULTIPLE_SITES | FILE_ATTRIBUTE_HARDLINK);
-        wantedAnyAttribs &= ~(FILE_ATTRIBUTE_HAS_MULTIPLE_SITES | FILE_ATTRIBUTE_HARDLINK);
-        rejectedAttribs &= ~(FILE_ATTRIBUTE_HAS_MULTIPLE_SITES | FILE_ATTRIBUTE_HARDLINK);
+		BOOL mandatoryADS = !!(mandatoryAttribs & FILE_ATTRIBUTE_HAS_ADS);
+		BOOL wantedADS = !!(wantedAnyAttribs & FILE_ATTRIBUTE_HAS_ADS);
+		BOOL rejectedADS = !!(rejectedAttribs & FILE_ATTRIBUTE_HAS_ADS);
+
+		mandatoryAttribs &= ~(FILE_ATTRIBUTE_HAS_MULTIPLE_SITES | FILE_ATTRIBUTE_HARDLINK | FILE_ATTRIBUTE_HAS_ADS);
+        wantedAnyAttribs &= ~(FILE_ATTRIBUTE_HAS_MULTIPLE_SITES | FILE_ATTRIBUTE_HARDLINK | FILE_ATTRIBUTE_HAS_ADS);
+        rejectedAttribs &= ~(FILE_ATTRIBUTE_HAS_MULTIPLE_SITES | FILE_ATTRIBUTE_HARDLINK | FILE_ATTRIBUTE_HAS_ADS);
 
         if ((attrs & mandatoryAttribs) != mandatoryAttribs)
             return;
@@ -724,9 +828,9 @@ VOID ProcessFile(WCHAR* FileName, BOOLEAN IsDirectory, DWORD mandatoryAttribs, D
         if (mandatoryLinks && !hasLinks)
             return;
         // when 'has multiple sites' or 'is a hardlink' is the only thing we *want*, it's kinda mandatory, eh:
-        if (wantedLinks && !wantedAnyAttribs && !hasLinks)
+        if (wantedLinks && !wantedAnyAttribs && !wantedADS && !hasLinks)
             return;
-        if (wantedHardLink && !wantedAnyAttribs && !hasLinks)
+        if (wantedHardLink && !wantedAnyAttribs && !wantedADS && !hasLinks)
             return;
         if (rejectedLinks && hasLinks)
             return;
@@ -779,85 +883,274 @@ VOID ProcessFile(WCHAR* FileName, BOOLEAN IsDirectory, DWORD mandatoryAttribs, D
         if (mandatoryHardLink && !isHardlink)
             return;
         // when 'is hardlink' is the only thing we *want*, it's kinda mandatory, eh:
-        if (wantedHardLink && !wantedAnyAttribs && !wantedLinks && !isHardlink)
+        if (wantedHardLink && !wantedAnyAttribs && !wantedLinks && !wantedADS && !isHardlink)
             return;
         if (rejectedHardLink && isHardlink)
             return;
 
-        FilesMatched++;
+		{
+			// only do the (costly!) check when we need it for the attribute check, or to show the info it produces:
+			// (NOTE that the ADS_CHECK_REPORTDATA destructor automagically cleans up heap memory when we exit this scope: cleaner code!)
+			ADS_CHECK_REPORTDATA ADS_report;
 
-        if (!output)
-        {
-            if (!conciseOutput)
-            {
-                CHAR attr_str[32];
-                CHAR fsize_str[32];
+			BOOL hasADS = (
+				(showADS || mandatoryADS || (wantedADS && !wantedAnyAttribs && !wantedLinks && !wantedHardLink) || rejectedADS) ?
+				FileHasADS(FileName, ADS_report) :
+				FALSE 
+			);
 
-                FileAttributes2String(attr_str, attrs);
-                FileSize2String(fsize_str, filesize);
+			// only perform these filter checks when we have actual legal  data to compare against:
+			if (!ADS_report.producedAnError())
+			{
+				if (mandatoryADS && !hasADS)
+					return;
+				// when 'has ADS' is the only thing we *want*, it's kinda mandatory, eh:
+				if (wantedADS && !wantedAnyAttribs && !wantedLinks && !wantedHardLink && !hasADS)
+					return;
+				if (rejectedADS && hasADS)
+					return;
+			}
 
-                fwprintf(stderr, L"\r");
-                fwprintf(stdout, L"%hs %hs %s\n", attr_str, fsize_str, FileName + 4 /* skip \\?\ prefix */);
-            }
-            else
-            {
-                // only dump the file paths to STDOUT in concise mode when NO output file has been specified.
-                fwprintf(stderr, L"\r");
-                fwprintf(stdout, L"%s\n", FileName + 4 /* skip \\?\ prefix */);
-            }
-        }
-        else
-        {
-            // register filename in the OUTPUT hash table when we're going to output it 'unordered' to output file.
-            TestAndAddInHashtable(FileName + 4 /* skip \\?\ prefix */, attrs, filesize, OutputFilePaths);
-        }
-    }
+			FilesMatched++;
 
-    if (showLinks)
-    {
-        WCHAR linkPath[MAX_PATH];
-        int linkCount = 0;
-        DWORD slen = nelem(linkPath);
-        HANDLE fnameHandle = FindFirstFileNameW(FileName, 0, &slen, linkPath);
-        if (fnameHandle == INVALID_HANDLE_VALUE)
-        {
-            fwprintf(stderr, L"\rError reading link names for %s:\n", FileName);
-            PrintWin32Error(GetLastError());
-        }
-        else
-        {
-            if (wcscmp(linkPath, FileName + 6 /* skip \\?\X: long filename prefix plus drive part as that is not present in the link path */))
-            {
-                fwprintf(stdout, L"\r#--Link: %2.2s%s\n", FileName + 4, linkPath);
-            }
-            linkCount++;
+			if (!output)
+			{
+				if (!conciseOutput)
+				{
+					CHAR attr_str[32];
+					CHAR fsize_str[32];
+					CHAR crtsize_str[32];
+					CHAR latsize_str[32];
+					CHAR lwtsize_str[32];
 
-            slen = nelem(linkPath);
-            while (FindNextFileNameW(fnameHandle, &slen, linkPath))
-            {
-                if (wcscmp(linkPath, FileName + 6 /* skip \\?\X: long filename prefix plus drive part as that is not present in the link path */))
-                {
-                    fwprintf(stdout, L"\r#--Link: %2.2s%s\n", FileName + 4, linkPath);
-                }
-                slen = nelem(linkPath);
-                linkCount++;
-            }
-            // EVERY file has ONE "hardlink" at least. UNIX-like "hardlinked files" have MULTIPLE sites:
-            if (linkCount > 1)
-            {
-                fwprintf(stdout, L"\r#--Number of sites: %d\n", linkCount);
-            }
+					FileAttributes2String(attr_str, attrs);
+					FileSize2String(fsize_str, filesize);
+					FileTime2String(crtsize_str, foundFile.ftCreationTime);
+					FileTime2String(lwtsize_str, foundFile.ftLastWriteTime);
+					FileTime2String(latsize_str, foundFile.ftLastWriteTime);
 
-            if (GetLastError() != ERROR_HANDLE_EOF)
-            {
-                fwprintf(stderr, L"\rError reading link names for %s:\n", FileName);
-                PrintWin32Error(GetLastError());
-            }
-            FindClose(fnameHandle);
-        }
-    }
+					fwprintf(stderr, L"\r");
+					fwprintf(stdout, L"%hs %hs %hs %hs %hs %s\n", attr_str, fsize_str, crtsize_str, lwtsize_str, latsize_str, FileName + 4 /* skip \\?\ prefix */);
+				}
+				else
+				{
+					// only dump the file paths to STDOUT in concise mode when NO output file has been specified.
+					fwprintf(stderr, L"\r");
+					fwprintf(stdout, L"%s\n", FileName + 4 /* skip \\?\ prefix */);
+				}
+			}
+			else
+			{
+				// register filename in the OUTPUT hash table when we're going to output it 'unordered' to output file.
+				TestAndAddInHashtable(FileName + 4 /* skip \\?\ prefix */, attrs, filesize, OutputFilePaths);
+			}
+
+			if (showLinks)
+			{
+				WCHAR linkPath[MAX_PATH];
+				int linkCount = 0;
+				DWORD slen = nelem(linkPath);
+				HANDLE fnameHandle = FindFirstFileNameW(FileName, 0, &slen, linkPath);
+				if (fnameHandle == INVALID_HANDLE_VALUE)
+				{
+					fwprintf(stderr, L"\rError reading link names for %s:\n", FileName);
+					PrintWin32Error(GetLastError());
+				}
+				else
+				{
+					if (wcscmp(linkPath, FileName + 6 /* skip \\?\X: long filename prefix plus drive part as that is not present in the link path */))
+					{
+						fwprintf(stdout, L"\r#--Link: %2.2s%s\n", FileName + 4, linkPath);
+					}
+					linkCount++;
+
+					slen = nelem(linkPath);
+					while (FindNextFileNameW(fnameHandle, &slen, linkPath))
+					{
+						if (wcscmp(linkPath, FileName + 6 /* skip \\?\X: long filename prefix plus drive part as that is not present in the link path */))
+						{
+							fwprintf(stdout, L"\r#--Link: %2.2s%s\n", FileName + 4, linkPath);
+						}
+						slen = nelem(linkPath);
+						linkCount++;
+					}
+					// EVERY file has ONE "hardlink" at least. UNIX-like "hardlinked files" have MULTIPLE sites:
+					if (linkCount > 1)
+					{
+						fwprintf(stdout, L"\r#--Number of sites: %d\n", linkCount);
+					}
+
+					if (GetLastError() != ERROR_HANDLE_EOF)
+					{
+						fwprintf(stderr, L"\rError reading link names for %s:\n", FileName);
+						PrintWin32Error(GetLastError());
+					}
+					FindClose(fnameHandle);
+				}
+			}
+
+			if (showADS)
+			{
+				if (ADS_report.producedAnError())
+				{
+					if (!ADS_report.hasOpenError || !IsDirectory || PrintDirectoryOpenErrors)
+					{
+						fwprintf(stderr, L"\r%s:\n", ADS_report.errorMessage);
+						PrintWin32Error(ADS_report.error);
+					}
+				}
+				else if (ADS_report.additionalStreamCount > 0)
+				{
+					// + https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_stream_information
+					ASSERT(ADS_report.streamInfoSize > 0);
+					PFILE_STREAM_INFORMATION streamInfoPtr = ADS_report.streamInfo;
+					PFILE_STREAM_INFORMATION streamInfoPtrEOF = (PFILE_STREAM_INFORMATION)(((BYTE *)ADS_report.streamInfo) + ADS_report.streamInfoSize);
+					BOOLEAN  printedFile = FALSE;
+					WCHAR    streamName[MAX_PATH + 1];
+					WCHAR    fullStreamName[MAX_PATH + 1];
+
+					while (streamInfoPtr < streamInfoPtrEOF)
+					{
+						ULONG nameLen = std::min((ULONG)sizeof(streamName), streamInfoPtr->StreamNameLength);
+						if (streamInfoPtr->StreamNameLength > 0)
+						{
+							ASSERT(streamInfoPtr->StreamNameLength == nameLen);
+							memcpy(streamName, streamInfoPtr->StreamName, nameLen);
+						}
+						streamName[nameLen / 2] = 0;
+
+						//
+						// Skip the standard Data stream
+						//
+						if (_wcsicmp(streamName, L"::$DATA"))
+						{
+							if (!printedFile)
+							{
+								fwprintf(stdout, L"\r%s:\n", FileName);
+								printedFile = TRUE;
+							}
+
+							fwprintf(stdout, L"   %24s\t%8I64d\n", streamName, streamInfoPtr->StreamSize.QuadPart);
+
+							swprintf(fullStreamName, nelem(fullStreamName), L"%s%s", FileName, streamName);
+							fullStreamName[nelem(fullStreamName) - 1] = 0;
+							HANDLE adsFileHandle = CreateFile(fullStreamName, GENERIC_READ,
+								FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+								OPEN_EXISTING,
+								FILE_FLAG_BACKUP_SEMANTICS, 0);
+							if (adsFileHandle == INVALID_HANDLE_VALUE)
+							{
+								fwprintf(stderr, L"\rError opening ADS stream \"%s\":\n", fullStreamName);
+								PrintWin32Error(GetLastError());
+							}
+							else
+							{
+								size_t content_len = streamInfoPtr->StreamSize.QuadPart;
+								BYTE* content = (BYTE *)malloc(content_len + 8);
+								if (content == nullptr)
+								{
+									fwprintf(stderr, L"\rERROR: Out of memory while allocating %lu bytes space for file stream info while inspecting ADS stream \"%s\":\n", ADS_report.streamInfoSize, fullStreamName);
+									PrintWin32Error(GetLastError());
+								}
+								else
+								{
+									DWORD actual_len = 0;
+
+									BOOL rv = ReadFile(adsFileHandle, content, (DWORD)content_len + 4, &actual_len, NULL);
+									if (!rv)
+									{
+										fwprintf(stderr, L"   Error reading ADS stream \"%s\":\n", fullStreamName);
+										PrintWin32Error(GetLastError());
+										free(content);
+										content = NULL;
+									}
+
+									if (content && actual_len > 0)
+									{
+										if (actual_len != content_len)
+										{
+											fwprintf(stderr, L"   Warning: actual length %zu != expected length %zu for \"%s\".\n", (size_t)actual_len, content_len, fullStreamName);
+										}
+										memset(content + actual_len, 0, 4);
+
+										// check if content is plain text or binary: use some simple heuristics for that:
+										bool is_plain_text = true;
+										for (size_t i = 0; i < actual_len; i++)
+										{
+											int c = content[i];
+											if (c < 32 && c != '\r' && c != '\n' && c != '\t')
+											{
+												is_plain_text = false;
+												break;
+											}
+											if (c == 127)
+											{
+												is_plain_text = false;
+												break;
+											}
+										}
+
+										if (is_plain_text)
+										{
+											// trim the trailing newlines:
+											BYTE* end = content + content_len - 1;
+											for (; end >= content; end--)
+											{
+												if (*end == '\r' || *end == '\n')
+													*end = 0;
+												else
+													break;
+											}
+
+											fwprintf(stdout, L"      --> text content:\n------------------------------------------\n%S\n------------------------------------------\n", content);
+										}
+										else
+										{
+											for (size_t i = 0; i < actual_len; i += 16)
+											{
+												fwprintf(stdout, L"   %08zu: \n", i);
+												for (size_t j = 0; j < 16; j++)
+												{
+													if (j + i < actual_len)
+														fwprintf(stdout, L"%02x ", content[i + j]);
+													else
+														fwprintf(stdout, L"   ");
+												}
+												fwprintf(stdout, L" | ");
+												for (size_t j = 0; j < 16; j++)
+												{
+													if (j + i < actual_len)
+													{
+														int c = content[i + j];
+														if (isprint(c))
+															fwprintf(stdout, L"%c ", c);
+														else
+															fwprintf(stdout, L". ");
+													}
+													else
+														fwprintf(stdout, L"  ");
+												}
+												fwprintf(stdout, L"\n");
+											}
+										}
+									}
+									free(content);
+								}
+								CloseHandle(adsFileHandle);
+							}
+						}
+
+						if (streamInfoPtr->NextEntryOffset == 0)
+							break;
+
+						streamInfoPtr = (PFILE_STREAM_INFORMATION)((BYTE *)streamInfoPtr + streamInfoPtr->NextEntryOffset);
+					}
+				}
+				// else: no extra ADS streams exist, so there's nothing to report!
+			}
+		}
+	}
 }
-
 
 
 //--------------------------------------------------------------------
@@ -869,7 +1162,7 @@ VOID ProcessFile(WCHAR* FileName, BOOLEAN IsDirectory, DWORD mandatoryAttribs, D
 //
 //--------------------------------------------------------------------
 void ProcessDirectory(WCHAR* PathName, WCHAR* SearchPattern, size_t SearchPatternSize,
-    BOOLEAN Recurse, DWORD mandatoryAttribs, DWORD wantedAnyAttribs, DWORD rejectedAttribs, BOOLEAN showLinks)
+    BOOLEAN Recurse, DWORD mandatoryAttribs, DWORD wantedAnyAttribs, DWORD rejectedAttribs, BOOLEAN showLinks, int showADS)
 {
     WCHAR			subName[MAX_PATH];
     WCHAR			fileSearchName[MAX_PATH];
@@ -990,9 +1283,9 @@ void ProcessDirectory(WCHAR* PathName, WCHAR* SearchPattern, size_t SearchPatter
                 //
                 ShowProgress();
 
-                ProcessFile(subName,
-                    (BOOLEAN)(foundFile.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY),
-                    mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks
+                ProcessFile(subName, foundFile,
+                    (BOOLEAN)(foundFile.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY), 
+                    mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks, showADS
                 );
             }
         } while (FindNextFile(patternHandle, &foundFile));
@@ -1059,7 +1352,7 @@ void ProcessDirectory(WCHAR* PathName, WCHAR* SearchPattern, size_t SearchPatter
                 //
                 ShowProgress();
 
-                ProcessDirectory(subName, SearchPattern, SearchPatternSize, Recurse, mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks);
+                ProcessDirectory(subName, SearchPattern, SearchPatternSize, Recurse, mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks, showADS);
             }
         } while (FindNextFile(dirHandle, &foundFile));
     }
@@ -1090,7 +1383,8 @@ int Usage(WCHAR* ProgramName)
     fwprintf(stderr, L"-w     mask of attributes which are Wanted (MAY HAVE)\n");
     fwprintf(stderr, L"-r     mask of attributes which are Rejected (HAS NOT)\n\n");
     fwprintf(stderr, L"-l     list all hardlink sites for every file which has multiple sites (hardlinks)\n");
-    fwprintf(stderr, L"-o     write the collected list of paths to the specified file (SEMI-RANDOM HASH-based order)\n");
+	fwprintf(stderr, L"-a     list all ADS (Advanced Data Streams) for each file. Repeat this option to also dump the streams' content.\n");
+	fwprintf(stderr, L"-o     write the collected list of paths to the specified file (SEMI-RANDOM HASH-based order)\n");
     fwprintf(stderr, L"\n");
     fwprintf(stderr, L"The M,W,R masks are processed as follows:\n"
             L"  mask & MUST(Mandatory) == MUST\n"
@@ -1113,7 +1407,8 @@ int Usage(WCHAR* ProgramName)
     fwprintf(stderr, L"       i : NOT_CONTENT_INDEXED\n");
     fwprintf(stderr, L"       E : ENCRYPTED\n");
     fwprintf(stderr, L"       t : INTEGRITY_STREAM\n");
-    fwprintf(stderr, L"       V : VIRTUAL\n");
+	fwprintf(stderr, L"       z : ADVANCED_DATA_STREAM\n");
+	fwprintf(stderr, L"       V : VIRTUAL\n");
     fwprintf(stderr, L"       b : NO_SCRUB_DATA\n");
     fwprintf(stderr, L"       a : EA\n");
     fwprintf(stderr, L"       P : PINNED\n");
@@ -1147,7 +1442,8 @@ int wmain(int argc, WCHAR* argv[])
     BOOLEAN     regular_only = FALSE;
     DWORD		fsFlags;
     BOOLEAN     showLinks = FALSE;
-    DWORD       mandatoryAttribs = 0;
+	int         showADS = 0;
+	DWORD       mandatoryAttribs = 0;
     DWORD       wantedAnyAttribs = 0;
     DWORD       rejectedAttribs = 0;
     WCHAR       searchPattern[MAX_PATH];
@@ -1218,9 +1514,13 @@ int wmain(int argc, WCHAR* argv[])
         // only match '/X' and '-X' options; the rest is search paths:
         if ((opt[0] == L'/' || opt[0] == L'-') && opt[2] == 0)
         {
-            if (opt[1] == L'c' || opt[1] == L'C')
+			if (opt[1] == L'c' || opt[1] == L'C')
+			{
+				conciseOutput = TRUE;
+			}
+			else if (opt[1] == L'a' || opt[1] == L'A')
             {
-                conciseOutput = TRUE;
+                showADS++;
             }
             else if (opt[1] == L's' || opt[1] == L'S')
             {
@@ -1257,7 +1557,7 @@ int wmain(int argc, WCHAR* argv[])
                 wcscpy_s(listOutputPath, argv[i]);
                 NormalizePathSeparators(listOutputPath);
 
-                char fname[MAX_PATH * 5];
+                char fname[MAX_PATH + 1];
                 CvtUTF16ToUTF8(fname, sizeof(fname), listOutputPath);
                 errno_t err = fopen_s(&output, fname, "w");
                 if (!output || err)
@@ -1312,7 +1612,22 @@ int wmain(int argc, WCHAR* argv[])
                 fwprintf(stderr, L"\nWARNING: The specified volume %s does not support Windows/NTFS hardlinks. We won't be able to find any of those then!\n\n", volume);
                 // ignore this inability, so we can scan network drives, etc. anyway.
             }
-        }
+			if (!(fsFlags & FILE_NAMED_STREAMS))
+			{
+				fwprintf(stderr, L"\nWARNING: The specified volume %s does not support Windows/NTFS Advanced Data Streams a.k.a. Named Streams. We won't be able to find any of those then!\n\n", volume);
+				// ignore this inability, so we can scan network drives, etc. anyway.
+			}
+			if (!(fsFlags & FILE_SUPPORTS_INTEGRITY_STREAMS))
+			{
+				fwprintf(stderr, L"\nWARNING: The specified volume %s does not support Windows/NTFS Integrity Streams. We won't be able to find any of those then!\n\n", volume);
+				// ignore this inability, so we can scan network drives, etc. anyway.
+			}
+			if (!(fsFlags & FILE_SUPPORTS_EXTENDED_ATTRIBUTES))
+			{
+				fwprintf(stderr, L"\nWARNING: The specified volume %s does not support Extended Attributes. We won't be able to find any of those then!\n\n", volume);
+				// ignore this inability, so we can scan network drives, etc. anyway.
+			}
+		}
         else if (searchPath[4 + 1] == L':')
         {
             // User very probably specified a '\\?\D:\...' UNC path. Check the drive letter in there.
@@ -1325,13 +1640,28 @@ int wmain(int argc, WCHAR* argv[])
                 fwprintf(stderr, L"\nWARNING: The specified volume %s does not support Windows/NTFS hardlinks. We won't be able to find any of those then!\n\n", volume);
                 // ignore this inability, so we can scan network drives, etc. anyway.
             }
-        }
+			if (!(fsFlags & FILE_NAMED_STREAMS))
+			{
+				fwprintf(stderr, L"\nWARNING: The specified volume %s does not support Windows/NTFS Advanced Data Streams a.k.a. Named Streams. We won't be able to find any of those then!\n\n", volume);
+				// ignore this inability, so we can scan network drives, etc. anyway.
+			}
+			if (!(fsFlags & FILE_SUPPORTS_INTEGRITY_STREAMS))
+			{
+				fwprintf(stderr, L"\nWARNING: The specified volume %s does not support Windows/NTFS Integrity Streams. We won't be able to find any of those then!\n\n", volume);
+				// ignore this inability, so we can scan network drives, etc. anyway.
+			}
+			if (!(fsFlags & FILE_SUPPORTS_EXTENDED_ATTRIBUTES))
+			{
+				fwprintf(stderr, L"\nWARNING: The specified volume %s does not support Extended Attributes. We won't be able to find any of those then!\n\n", volume);
+				// ignore this inability, so we can scan network drives, etc. anyway.
+			}
+		}
 
         //
         // Now go and process directories
         //
         searchPattern[0] = 0;           // signal initial call of this recursive function
-        ProcessDirectory(searchPath, searchPattern, nelem(searchPattern), recurse, mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks);
+        ProcessDirectory(searchPath, searchPattern, nelem(searchPattern), recurse, mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks, showADS);
     }
 
     CloseOutput();
