@@ -2,7 +2,13 @@
 #define __NTFS_ADS_IO_H__
 
 #define UNICODE 1
+
+// https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/defining-new-ntstatus-values
+// https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/using-ntstatus-values
+#include <winnt.h>
 #include <windows.h>
+//#include <ntdef.h>
+//#include <ntstatus.h>
 
 
 // return number of elements
@@ -11,12 +17,25 @@
 //
 // Check for success
 //
+#ifndef NT_SUCCESS
 #define NT_SUCCESS(Status) ((NTSTATUS)(Status) >= 0)
+#endif
 
 //
 // The NT return codes we care about
 //
+#ifndef STATUS_BUFFER_OVERFLOW
 #define STATUS_BUFFER_OVERFLOW           ((NTSTATUS)0x80000005L)
+#endif
+
+#if !defined(APPLICATION_ERROR_MASK)
+#define APPLICATION_ERROR_MASK       0x20000000
+#define ERROR_SEVERITY_SUCCESS       0x00000000
+#define ERROR_SEVERITY_INFORMATIONAL 0x40000000
+#define ERROR_SEVERITY_WARNING       0x80000000
+#define ERROR_SEVERITY_ERROR         0xC0000000
+#endif
+
 
 //--------------------------------------------------------------------
 //     N T F S C O N T R O L F I L E   D E F I N I T I O N S

@@ -2,12 +2,13 @@
 #define __NTFS_ADS_IO_H__
 
 #define UNICODE 1
-#include <windows.h>
 
 // https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/defining-new-ntstatus-values
 // https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/using-ntstatus-values
-#include <Ntdef.h>
-#include <Ntstatus.h>
+#include <winnt.h>
+#include <windows.h>
+//#include <ntdef.h>
+//#include <ntstatus.h>
 
 
 // return number of elements

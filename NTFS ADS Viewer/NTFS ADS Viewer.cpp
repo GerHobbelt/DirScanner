@@ -7,8 +7,11 @@
 #include "ntfs_ads_io.h"
 
 // Make sure we support Long Paths:
+#if defined(MAX_PATH) && MAX_PATH > 1500
+#error "Bump our Large-File-Names-MAX_PATH replacement define at the line further below!"
+#endif
 #undef MAX_PATH
-#define MAX_PATH 1500
+#define MAX_PATH     1500
 
 #define ASSERT(t)                       \
     if (!(t))                           \
