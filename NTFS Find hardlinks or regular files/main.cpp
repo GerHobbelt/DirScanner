@@ -48,6 +48,7 @@ typedef struct
     DWORD attrs;
     WCHAR* path;
     uint64_t filesize;
+	FILETIME timestamp;
 } HashtableEntry;
 
 
@@ -514,10 +515,14 @@ void CloseOutput(void)
             {
                 DWORD attrs = slot->attrs;
                 CHAR attr_str[32];
+				CHAR fsize_str[32];
+				CHAR time_str[32];
 
-                FileAttributes2String(attr_str, attrs);
+				FileAttributes2String(attr_str, attrs);
+				FileSize2String(fsize_str, slot->filesize);
+				FileTime2String(time_str, slot->timestamp);
 
-                fprintf(output, "%8lx:%s %21I64u %s\n", (unsigned long)attrs, attr_str, slot->filesize, fname);
+                fprintf(output, "$%08lx:%s %s %s %s\n", (unsigned long)attrs, attr_str, fsize_str, time_str, fname);
             }
 
             free(slot->path);
@@ -531,7 +536,7 @@ void CloseOutput(void)
 }
 
 
-int TestAndAddInHashtable(const WCHAR* str, const DWORD attrs, uint64_t filesize, HashtableEntry *UniqueFilePaths)
+int TestAndAddInHashtable(const WCHAR* str, const DWORD attrs, uint64_t filesize, FILETIME timestamp, HashtableEntry *UniqueFilePaths)
 {
     unsigned int hash = CalculateHash(str);
     unsigned int idx = hash - 1;
@@ -554,6 +559,7 @@ int TestAndAddInHashtable(const WCHAR* str, const DWORD attrs, uint64_t filesize
     slot->path = _wcsdup(str);
     slot->attrs = attrs;
     slot->filesize = filesize;
+	slot->timestamp = timestamp;
     return 0;                   // 0: not present before, ADDED now!
 }
 
@@ -734,6 +740,19 @@ BOOL FileHasADS(const WCHAR* FileName, ADS_CHECK_REPORTDATA &report)
 	return (report.additionalStreamCount > 0);
 }
 
+FILETIME determineLatestTime(const FILETIME &a, const FILETIME &b, const FILETIME &c)
+{
+	FILETIME t = a;
+	if (b.dwHighDateTime > t.dwHighDateTime)
+		t = b;
+	else if (b.dwHighDateTime == t.dwHighDateTime && b.dwLowDateTime == t.dwLowDateTime)
+		t = b;
+	if (c.dwHighDateTime > t.dwHighDateTime)
+		t = c;
+	else if (c.dwHighDateTime == t.dwHighDateTime && c.dwLowDateTime == t.dwLowDateTime)
+		t = c;
+	return t;
+}
 
 
 void ClearProgress(void)
@@ -789,6 +808,8 @@ VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDi
 	uint64_t filesize2 = foundFile.nFileSizeLow + (((uint64_t)foundFile.nFileSizeHigh) << 32);
 	ASSERT(filesize == filesize2);
 
+	FILETIME latest_time = determineLatestTime(foundFile.ftCreationTime, foundFile.ftLastWriteTime, foundFile.ftLastAccessTime);
+
     if (!rv || attrs == INVALID_FILE_ATTRIBUTES)
     {
         fwprintf(stderr, L"\rError reading attributes of %s:\n", FileName);
@@ -843,7 +864,7 @@ VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDi
         BOOL isHardlink = FALSE;
         if (hasLinks)
         {
-            if (!TestAndAddInHashtable(FileName, attrs, filesize, UniqueFilePaths))
+            if (!TestAndAddInHashtable(FileName, attrs, filesize, latest_time, UniqueFilePaths))
             {
                 WCHAR linkPath[MAX_PATH];
                 WCHAR fullPath[MAX_PATH];
@@ -855,7 +876,7 @@ VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDi
                     {
                         wcsncpy_s(fullPath, FileName, 6);
                         wcsncat_s(fullPath, linkPath, nelem(fullPath));
-                        TestAndAddInHashtable(fullPath, attrs | FILE_ATTRIBUTE_HARDLINK, filesize, UniqueFilePaths);
+                        TestAndAddInHashtable(fullPath, attrs | FILE_ATTRIBUTE_HARDLINK, filesize, latest_time, UniqueFilePaths);
                     }
 
                     slen = nelem(linkPath);
@@ -865,7 +886,7 @@ VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDi
                         {
                             wcsncpy_s(fullPath, FileName, 6);
                             wcsncat_s(fullPath, linkPath, nelem(fullPath));
-                            TestAndAddInHashtable(fullPath, attrs | FILE_ATTRIBUTE_HARDLINK, filesize, UniqueFilePaths);
+                            TestAndAddInHashtable(fullPath, attrs | FILE_ATTRIBUTE_HARDLINK, filesize, latest_time, UniqueFilePaths);
                         }
                         slen = nelem(linkPath);
                     }
@@ -947,10 +968,10 @@ VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDi
 			else
 			{
 				// register filename in the OUTPUT hash table when we're going to output it 'unordered' to output file.
-				TestAndAddInHashtable(FileName + 4 /* skip \\?\ prefix */, attrs, filesize, OutputFilePaths);
+				TestAndAddInHashtable(FileName + 4 /* skip \\?\ prefix */, attrs, filesize, latest_time, OutputFilePaths);
 			}
 
-			if (showLinks)
+			if (showLinks && !output)
 			{
 				WCHAR linkPath[MAX_PATH];
 				int linkCount = 0;
@@ -994,7 +1015,7 @@ VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDi
 				}
 			}
 
-			if (showADS)
+			if (showADS && !output)
 			{
 				if (ADS_report.producedAnError())
 				{
@@ -1028,7 +1049,7 @@ VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDi
 						//
 						if (_wcsicmp(streamName, L"::$DATA"))
 						{
-							fwprintf(stdout, L"   %24s\t%8I64d\n", streamName, streamInfoPtr->StreamSize.QuadPart);
+							fwprintf(stdout, L"   %24s\t%21I64d\n", streamName, streamInfoPtr->StreamSize.QuadPart);
 
 							swprintf(fullStreamName, nelem(fullStreamName), L"%s%s", FileName, streamName);
 							fullStreamName[nelem(fullStreamName) - 1] = 0;
