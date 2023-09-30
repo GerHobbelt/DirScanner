@@ -42,3 +42,4 @@
 *.ipdb
 *.exe.recipe
 *.obj.enc
+*.FileListAbsolute.txt
