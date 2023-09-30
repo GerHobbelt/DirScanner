@@ -35,9 +35,9 @@ static RtlNtStatusToDosError_f RtlNtStatusToDosError;
 
 
 // hack: unused attributes bits used by us to signal hardlinks are present
-#define FILE_ATTRIBUTE_HAS_MULTIPLE_SITES  ((DWORD)0x400000000U)
-#define FILE_ATTRIBUTE_HARDLINK            ((DWORD)0x200000000U)
-#define FILE_ATTRIBUTE_HAS_ADS             ((DWORD)0x100000000U)
+#define FILE_ATTRIBUTE_HAS_MULTIPLE_SITES  0x20000000U
+#define FILE_ATTRIBUTE_HARDLINK            0x40000000U
+#define FILE_ATTRIBUTE_HAS_ADS             0x80000000U
 
 
 #define PRIME_MODULUS    16769023
@@ -911,6 +911,11 @@ VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDi
 					return;
 			}
 
+			if (hasADS)
+			{
+				attrs |= FILE_ATTRIBUTE_HAS_ADS;
+			}
+
 			FilesMatched++;
 
 			if (!output)
@@ -1005,7 +1010,6 @@ VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDi
 					ASSERT(ADS_report.streamInfoSize > 0);
 					PFILE_STREAM_INFORMATION streamInfoPtr = ADS_report.streamInfo;
 					PFILE_STREAM_INFORMATION streamInfoPtrEOF = (PFILE_STREAM_INFORMATION)(((BYTE *)ADS_report.streamInfo) + ADS_report.streamInfoSize);
-					BOOLEAN  printedFile = FALSE;
 					WCHAR    streamName[MAX_PATH + 1];
 					WCHAR    fullStreamName[MAX_PATH + 1];
 
@@ -1024,12 +1028,6 @@ VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDi
 						//
 						if (_wcsicmp(streamName, L"::$DATA"))
 						{
-							if (!printedFile)
-							{
-								fwprintf(stdout, L"\r%s:\n", FileName);
-								printedFile = TRUE;
-							}
-
 							fwprintf(stdout, L"   %24s\t%8I64d\n", streamName, streamInfoPtr->StreamSize.QuadPart);
 
 							swprintf(fullStreamName, nelem(fullStreamName), L"%s%s", FileName, streamName);
@@ -1102,7 +1100,7 @@ VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDi
 													break;
 											}
 
-											fwprintf(stdout, L"      --> text content:\n------------------------------------------\n%S\n------------------------------------------\n", content);
+											fwprintf(stdout, L"      --> text content:\n------------------------------------------\n%S\n------------------------------------------\n\n", content);
 										}
 										else
 										{
