@@ -30,3 +30,15 @@
 *.exe
 *.out
 *.app
+
+# MSVC compiler/IDE stuff
+*.tlog
+*.idb
+*.pdb
+*.log
+*.ilk
+*.user
+*.iobj
+*.ipdb
+*.exe.recipe
+*.obj.enc
