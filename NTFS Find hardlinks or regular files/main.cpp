@@ -606,21 +606,13 @@ struct ADS_CHECK_REPORTDATA {
 };
 
 
+// Queries a file to obtain stream information.
+//
 // Return TRUE when file has *any* ADS (Alternative Data Streams); hence we need not look any further than a streams list that's longer than just basic/fundamental `::$DATA`.
 BOOL FileHasADS(const WCHAR* FileName, ADS_CHECK_REPORTDATA &report)
 {
-	//--------------------------------------------------------------------
-	//
-	// ProcessFile
-	//
-	// Queries a file to obtain stream information.
-	//
-	//--------------------------------------------------------------------
 	HANDLE   fileHandle;
 
-	//
-	// Open the file
-	//
 	fileHandle = CreateFile(FileName, GENERIC_READ,
 		FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
 		OPEN_EXISTING,
@@ -798,16 +790,29 @@ void ShowProgress(void)
 // Queries a file to obtain stream information.
 //
 //--------------------------------------------------------------------
-VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDirectory, DWORD mandatoryAttribs, DWORD wantedAnyAttribs, DWORD rejectedAttribs, BOOLEAN showLinks, int showADS)
+uint64_t ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDirectory, DWORD mandatoryAttribs, DWORD wantedAnyAttribs, DWORD rejectedAttribs, BOOLEAN showLinks, BOOLEAN reportDiskUsage, int showADS)
 {
     WIN32_FILE_ATTRIBUTE_DATA attr_data = { INVALID_FILE_ATTRIBUTES };
+	
+	// The next call reports the size on disk used by a directory while foundFile (as filled by firstfirst/FindNext) will report 0(zero).
+	// For *files* the reported file size will be identical to the size reported by Findfirst/FindNext UNLESS the file is special or OPENED
+	// by another process, e.g. logfiles being redirected to in a parallel running process. !@#$
     BOOL rv = GetFileAttributesEx(FileName, GetFileExInfoStandard, &attr_data);
+
     DWORD attrs = attr_data.dwFileAttributes;
     uint64_t filesize = attr_data.nFileSizeLow + (((uint64_t)attr_data.nFileSizeHigh) << 32);
 	ASSERT(attrs == foundFile.dwFileAttributes);
 	uint64_t filesize2 = foundFile.nFileSizeLow + (((uint64_t)foundFile.nFileSizeHigh) << 32);
-	ASSERT(filesize == filesize2);
-
+	
+	if (filesize != filesize2 && !IsDirectory)
+	{
+		fwprintf(stderr, L"Assertion failed for %s: %I64u != %I64u\n", FileName, filesize, filesize2);
+		//ASSERT(filesize == filesize2);
+	}
+	if (filesize2 != 0 && IsDirectory)
+	{
+		ASSERT(IsDirectory ? filesize2 == 0 : TRUE);
+	}
 	FILETIME latest_time = determineLatestTime(foundFile.ftCreationTime, foundFile.ftLastWriteTime, foundFile.ftLastAccessTime);
 
     if (!rv || attrs == INVALID_FILE_ATTRIBUTES)
@@ -838,23 +843,23 @@ VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDi
         rejectedAttribs &= ~(FILE_ATTRIBUTE_HAS_MULTIPLE_SITES | FILE_ATTRIBUTE_HARDLINK | FILE_ATTRIBUTE_HAS_ADS);
 
         if ((attrs & mandatoryAttribs) != mandatoryAttribs)
-            return;
+            return filesize;
         if (wantedAnyAttribs && (attrs & wantedAnyAttribs) == 0)
-            return;
+            return filesize;
         if (attrs & rejectedAttribs)
-            return;
+            return filesize;
 
         BOOL hasLinks = FileHasMultipleInstances(FileName);
 
         if (mandatoryLinks && !hasLinks)
-            return;
+            return filesize;
         // when 'has multiple sites' or 'is a hardlink' is the only thing we *want*, it's kinda mandatory, eh:
         if (wantedLinks && !wantedAnyAttribs && !wantedADS && !hasLinks)
-            return;
+            return filesize;
         if (wantedHardLink && !wantedAnyAttribs && !wantedADS && !hasLinks)
-            return;
+            return filesize;
         if (rejectedLinks && hasLinks)
-            return;
+            return filesize;
 
         if (hasLinks)
             attrs |= FILE_ATTRIBUTE_HAS_MULTIPLE_SITES;
@@ -902,12 +907,12 @@ VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDi
         }
 
         if (mandatoryHardLink && !isHardlink)
-            return;
+            return filesize;
         // when 'is hardlink' is the only thing we *want*, it's kinda mandatory, eh:
         if (wantedHardLink && !wantedAnyAttribs && !wantedLinks && !wantedADS && !isHardlink)
-            return;
+            return filesize;
         if (rejectedHardLink && isHardlink)
-            return;
+            return filesize;
 
 		{
 			// only do the (costly!) check when we need it for the attribute check, or to show the info it produces:
@@ -924,12 +929,12 @@ VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDi
 			if (!ADS_report.producedAnError())
 			{
 				if (mandatoryADS && !hasADS)
-					return;
+					return filesize;
 				// when 'has ADS' is the only thing we *want*, it's kinda mandatory, eh:
 				if (wantedADS && !wantedAnyAttribs && !wantedLinks && !wantedHardLink && !hasADS)
-					return;
+					return filesize;
 				if (rejectedADS && hasADS)
-					return;
+					return filesize;
 			}
 
 			if (hasADS)
@@ -941,28 +946,32 @@ VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDi
 
 			if (!output)
 			{
-				if (!conciseOutput)
+				// List all files when we either are running in regular mode OR are running in reportdiskUsage mode with noisy output, i.e. quiet disabled.
+				if (!reportDiskUsage || !quiet)
 				{
-					CHAR attr_str[32];
-					CHAR fsize_str[32];
-					CHAR crtsize_str[32];
-					CHAR latsize_str[32];
-					CHAR lwtsize_str[32];
+					if (!conciseOutput)
+					{
+						CHAR attr_str[32];
+						CHAR fsize_str[32];
+						CHAR crtsize_str[32];
+						CHAR latsize_str[32];
+						CHAR lwtsize_str[32];
 
-					FileAttributes2String(attr_str, attrs);
-					FileSize2String(fsize_str, filesize);
-					FileTime2String(crtsize_str, foundFile.ftCreationTime);
-					FileTime2String(lwtsize_str, foundFile.ftLastWriteTime);
-					FileTime2String(latsize_str, foundFile.ftLastWriteTime);
+						FileAttributes2String(attr_str, attrs);
+						FileSize2String(fsize_str, filesize);
+						FileTime2String(crtsize_str, foundFile.ftCreationTime);
+						FileTime2String(lwtsize_str, foundFile.ftLastWriteTime);
+						FileTime2String(latsize_str, foundFile.ftLastWriteTime);
 
-					fwprintf(stderr, L"\r");
-					fwprintf(stdout, L"%hs %hs %hs %hs %hs %s\n", attr_str, fsize_str, crtsize_str, lwtsize_str, latsize_str, FileName + 4 /* skip \\?\ prefix */);
-				}
-				else
-				{
-					// only dump the file paths to STDOUT in concise mode when NO output file has been specified.
-					fwprintf(stderr, L"\r");
-					fwprintf(stdout, L"%s\n", FileName + 4 /* skip \\?\ prefix */);
+						ClearProgress();
+						fwprintf(stdout, L"%hs %hs %hs %hs %hs %s\n", attr_str, fsize_str, crtsize_str, lwtsize_str, latsize_str, FileName + 4 /* skip \\?\ prefix */);
+					}
+					else
+					{
+						// only dump the file paths to STDOUT in concise mode when NO output file has been specified.
+						ClearProgress();
+						fwprintf(stdout, L"%s\n", FileName + 4 /* skip \\?\ prefix */);
+					}
 				}
 			}
 			else
@@ -1169,6 +1178,8 @@ VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDi
 			}
 		}
 	}
+
+	return filesize;
 }
 
 
@@ -1180,8 +1191,8 @@ VOID ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDi
 // function.
 //
 //--------------------------------------------------------------------
-void ProcessDirectory(WCHAR* PathName, WCHAR* SearchPattern, size_t SearchPatternSize,
-    BOOLEAN Recurse, DWORD mandatoryAttribs, DWORD wantedAnyAttribs, DWORD rejectedAttribs, BOOLEAN showLinks, int showADS)
+uint64_t ProcessDirectory(WCHAR* PathName, WCHAR* SearchPattern, size_t SearchPatternSize,
+    BOOLEAN Recurse, DWORD mandatoryAttribs, DWORD wantedAnyAttribs, DWORD rejectedAttribs, BOOLEAN showLinks, BOOLEAN reportDiskUsage, int showADS, int dirTreeDepth)
 {
     WCHAR			subName[MAX_PATH];
     WCHAR			fileSearchName[MAX_PATH];
@@ -1190,6 +1201,8 @@ void ProcessDirectory(WCHAR* PathName, WCHAR* SearchPattern, size_t SearchPatter
     HANDLE			patternHandle;
     BOOLEAN	        firstCall = (SearchPattern[0] == 0);
     WIN32_FIND_DATA foundFile;
+	uint64_t        diskSpaceCost = 0;
+	uint64_t        diskSpaceCostWithoutSubDirCosts;
 
     //
     // Scan the files and/or directories if this is a directory
@@ -1302,14 +1315,16 @@ void ProcessDirectory(WCHAR* PathName, WCHAR* SearchPattern, size_t SearchPatter
                 //
                 ShowProgress();
 
-                ProcessFile(subName, foundFile,
-                    (BOOLEAN)(foundFile.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY), 
-                    mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks, showADS
+				diskSpaceCost += ProcessFile(subName, foundFile,
+                    (BOOLEAN)!!(foundFile.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY), 
+                    mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks, reportDiskUsage, showADS
                 );
             }
         } while (FindNextFile(patternHandle, &foundFile));
         FindClose(patternHandle);
     }
+
+	diskSpaceCostWithoutSubDirCosts = diskSpaceCost;
 
     //
     // Now recurse if we're supposed to
@@ -1327,8 +1342,8 @@ void ProcessDirectory(WCHAR* PathName, WCHAR* SearchPattern, size_t SearchPatter
                     //
                     // Nothing to process
                     //
-                    return;
-                }
+					goto finish;
+				}
             }
             else
             {
@@ -1337,8 +1352,8 @@ void ProcessDirectory(WCHAR* PathName, WCHAR* SearchPattern, size_t SearchPatter
                     //
                     // Nothing to process
                     //
-                    return;
-                }
+					goto finish;
+				}
             }
         }
         else
@@ -1348,7 +1363,7 @@ void ProcessDirectory(WCHAR* PathName, WCHAR* SearchPattern, size_t SearchPatter
                 //
                 // Nothing to process
                 //
-                return;
+                goto finish;
             }
         }
         firstCall = FALSE;
@@ -1371,12 +1386,21 @@ void ProcessDirectory(WCHAR* PathName, WCHAR* SearchPattern, size_t SearchPatter
                 //
                 ShowProgress();
 
-                ProcessDirectory(subName, SearchPattern, SearchPatternSize, Recurse, mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks, showADS);
+				diskSpaceCost += ProcessDirectory(subName, SearchPattern, SearchPatternSize, Recurse, mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks, reportDiskUsage, showADS, dirTreeDepth + 1);
             }
         } while (FindNextFile(dirHandle, &foundFile));
     }
 
     FindClose(dirHandle);
+
+finish:
+	if (reportDiskUsage)
+	{
+		ClearProgress();
+		fwprintf(stdout, L"## Disk Usage............. %21I64u %21I64u @ Dirtree depth %6i ............................. %s\n", diskSpaceCost, diskSpaceCostWithoutSubDirCosts, dirTreeDepth, searchName + 4);
+	}
+
+	return diskSpaceCost;
 }
 
 
@@ -1390,7 +1414,7 @@ int Usage(WCHAR* ProgramName)
     else
         baseName++;
 
-    fwprintf(stderr, L"\nDirScanner v1.2 - List directory contents including NTFS hardlinks\n");
+    fwprintf(stderr, L"\nDirScanner v1.3 - List directory contents including NTFS hardlinks\n");
     fwprintf(stderr, L"Copyright (C) 2021-2023 Ger Hobbelt\n");
     fwprintf(stderr, L"Some parts Copyright (C) 1999-2005 Mark Russinovich\n");
 
@@ -1404,7 +1428,8 @@ int Usage(WCHAR* ProgramName)
     fwprintf(stderr, L"-l     list all hardlink sites for every file which has multiple sites (hardlinks)\n");
 	fwprintf(stderr, L"-a     list all ADS (Advanced Data Streams) for each file. Repeat this option to also dump the streams' content.\n");
 	fwprintf(stderr, L"-o     write the collected list of paths to the specified file (SEMI-RANDOM HASH-based order)\n");
-    fwprintf(stderr, L"\n");
+	fwprintf(stderr, L"-u     Report disk usage per element. Directories report the total amount of storage taken up by all matched files within.\n");
+	fwprintf(stderr, L"\n");
     fwprintf(stderr, L"The M,W,R masks are processed as follows:\n"
             L"  mask & MUST(Mandatory) == MUST\n"
             L"  mask & MAY(Wanted) != 0          (if '-w' was specified)\n"
@@ -1449,7 +1474,16 @@ int Usage(WCHAR* ProgramName)
     fwprintf(stderr, L"      You can filter with '/w L' to see all file paths for 'hardlinked' files.\n");
     fwprintf(stderr, L"      You can filter with '/m L /r X' to see the *first occurrence* of each 'hardlinked' file\n");
     fwprintf(stderr, L"      in the given search path.\n");
-    fwprintf(stderr, L"\n");
+	fwprintf(stderr, L"\n");
+	fwprintf(stderr, L"NOTE: '-u' disk usage mode only counts the files matching the user-supplied wildcard pattern,\n");
+	fwprintf(stderr, L"      if any was provided. The default wildcard pattern is '*.*' matching all files.\n");
+	fwprintf(stderr, L"      Every directory reports both its cummulative size (including subdirectories) and its\n");
+	fwprintf(stderr, L"      bare size, i.e. only the sum of files in the directory itself.\n");
+	fwprintf(stderr, L"      The cost of storing any directory file structures (as reported by the OS) on disk are\n");
+	fwprintf(stderr, L"      included in the reported sums. As such even an empty directory will report some minimal\n");
+	fwprintf(stderr, L"      cost.\n");
+	fwprintf(stderr, L"      Thus you can get a report similar to UNIX 'du', but advanced features built in.\n");
+	fwprintf(stderr, L"\n");
 
     return -1;
 }
@@ -1461,6 +1495,7 @@ int wmain(int argc, WCHAR* argv[])
     BOOLEAN     regular_only = FALSE;
     DWORD		fsFlags;
     BOOLEAN     showLinks = FALSE;
+	BOOLEAN     reportDiskUsage = FALSE;
 	int         showADS = 0;
 	DWORD       mandatoryAttribs = 0;
     DWORD       wantedAnyAttribs = 0;
@@ -1468,6 +1503,7 @@ int wmain(int argc, WCHAR* argv[])
     WCHAR       searchPattern[MAX_PATH];
     WCHAR		searchPath[MAX_PATH];
     WCHAR		listOutputPath[MAX_PATH];
+	uint64_t    diskSpaceCost = 0;
     int         i;
 
     ticks = clock();
@@ -1588,7 +1624,11 @@ int wmain(int argc, WCHAR* argv[])
                     return EXIT_FAILURE;
                 }
             }
-            else
+			else if (opt[1] == L'u' || opt[1] == 'U')
+			{
+				reportDiskUsage = TRUE;
+			}
+			else
             {
                 fwprintf(stderr, L"Unrecognized commandline argument: %s\n\n", opt);
                 return Usage(argv[0]);
@@ -1680,7 +1720,7 @@ int wmain(int argc, WCHAR* argv[])
         // Now go and process directories
         //
         searchPattern[0] = 0;           // signal initial call of this recursive function
-        ProcessDirectory(searchPath, searchPattern, nelem(searchPattern), recurse, mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks, showADS);
+        diskSpaceCost += ProcessDirectory(searchPath, searchPattern, nelem(searchPattern), recurse, mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks, reportDiskUsage, showADS, 0);
     }
 
     CloseOutput();
@@ -1695,6 +1735,12 @@ int wmain(int argc, WCHAR* argv[])
             fwprintf(stderr, L"\rNo matching files found.\n\n");
         }
     }
+
+	if (reportDiskUsage)
+	{
+		ClearProgress();
+		fwprintf(stdout, L"## Disk Usage............. %21I64u .......................................................................... (---TOTAL---)\n", diskSpaceCost);
+	}
 
     return 0;
 }
