@@ -22,11 +22,16 @@
 #undef MAX_PATH
 #define MAX_PATH     1500
 
+static void barf_on_assert_failure(const char *msg)
+{                                   
+    fprintf(stderr, "assertion failed: %s\n", msg); 
+    exit(666);                      
+}      
+
 #define ASSERT(t)                       \
     if (!(t))                           \
     {                                   \
-        fprintf(stderr, "assertion failed: %s\n", #t); \
-        exit(666);                      \
+        barf_on_assert_failure(#t);     \
     }      
 
 static NtQueryInformationFile_f NtQueryInformationFile;
@@ -804,10 +809,10 @@ uint64_t ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN 
 	ASSERT(attrs == foundFile.dwFileAttributes);
 	uint64_t filesize2 = foundFile.nFileSizeLow + (((uint64_t)foundFile.nFileSizeHigh) << 32);
 	
-	if (filesize != filesize2 && !IsDirectory)
+	if (filesize < filesize2 && !IsDirectory)
 	{
 		fwprintf(stderr, L"Assertion failed for %s: %I64u != %I64u\n", FileName, filesize, filesize2);
-		//ASSERT(filesize == filesize2);
+		ASSERT(filesize == filesize2);
 	}
 	if (filesize2 != 0 && IsDirectory)
 	{
@@ -1476,7 +1481,7 @@ int Usage(WCHAR* ProgramName)
     fwprintf(stderr, L"      in the given search path.\n");
 	fwprintf(stderr, L"\n");
 	fwprintf(stderr, L"NOTE: '-u' disk usage mode only counts the files matching the user-supplied wildcard pattern,\n");
-	fwprintf(stderr, L"      if any was provided. The default wildcard pattern is '*.*' matching all files.\n");
+	fwprintf(stderr, L"      if any was provided.\n");
 	fwprintf(stderr, L"      Every directory reports both its cummulative size (including subdirectories) and its\n");
 	fwprintf(stderr, L"      bare size, i.e. only the sum of files in the directory itself.\n");
 	fwprintf(stderr, L"      The cost of storing any directory file structures (as reported by the OS) on disk are\n");
@@ -1637,20 +1642,32 @@ int wmain(int argc, WCHAR* argv[])
             continue;
         }
 
-        // https://docs.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
-        wcsncpy_s(searchPath, L"\\\\?\\", 4);
-        PWCHAR filePart;
-        GetFullPathName(argv[i], MAX_PATH - 4, searchPath + 4, &filePart);
-        NormalizePathSeparators(searchPath + 4);
-        if (wcsncmp(searchPath + 4, L"\\\\?\\", 4) == 0)
-        {
-            // user specified UNC path!
-            memmove(searchPath, searchPath + 4, (wcslen(searchPath + 4) + 1) * sizeof(searchPath[0]));
-        }
-        else
-        {
-            NormalizePathSeparators(searchPath);
-        }
+		// As the Windows GetFullPathName() API is a nasty animal that does NOT cope with 
+		// being fed UNC paths, so we need some prepwork before we can use it to expand 
+		// any path to an absolute path.
+		//
+		// Check if the specified path is a full UNC path:
+		const WCHAR *specPath = argv[i];
+		wcsncpy_s(searchPath, specPath, MAX_PATH - 1);
+		NormalizePathSeparators(searchPath);
+
+		if (wcsncmp(searchPath, L"\\\\?\\", 4) == 0)
+		{
+			// nothing to do...
+		}
+		else 
+		{
+			WCHAR buf[MAX_PATH] = {0};
+			wcsncpy_s(buf, specPath, MAX_PATH - 1);
+			NormalizePathSeparators(buf);
+
+			// https://docs.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
+			wcsncpy_s(searchPath, L"\\\\?\\", 4);
+
+			PWCHAR filePart = NULL;
+			GetFullPathName(buf, MAX_PATH - 4, searchPath + 4, &filePart);
+			NormalizePathSeparators(searchPath);
+		}
 
         if (!quiet)
         {
@@ -1660,34 +1677,7 @@ int wmain(int argc, WCHAR* argv[])
         //
         // Check that it's a NTFS volume and report limited abilities when it's not
         //
-        if (searchPath[1] == L':')
-        {
-            fsFlags = 0;
-            WCHAR volume[] = L"C:\\";
-            volume[0] = searchPath[0];
-            GetVolumeInformation(volume, NULL, 0, NULL, NULL, &fsFlags, NULL, 0);
-            if (!(fsFlags & FILE_SUPPORTS_HARD_LINKS))
-            {
-                fwprintf(stderr, L"\nWARNING: The specified volume %s does not support Windows/NTFS hardlinks. We won't be able to find any of those then!\n\n", volume);
-                // ignore this inability, so we can scan network drives, etc. anyway.
-            }
-			if (!(fsFlags & FILE_NAMED_STREAMS))
-			{
-				fwprintf(stderr, L"\nWARNING: The specified volume %s does not support Windows/NTFS Advanced Data Streams a.k.a. Named Streams. We won't be able to find any of those then!\n\n", volume);
-				// ignore this inability, so we can scan network drives, etc. anyway.
-			}
-			if (!(fsFlags & FILE_SUPPORTS_INTEGRITY_STREAMS))
-			{
-				fwprintf(stderr, L"\nWARNING: The specified volume %s does not support Windows/NTFS Integrity Streams. We won't be able to find any of those then!\n\n", volume);
-				// ignore this inability, so we can scan network drives, etc. anyway.
-			}
-			if (!(fsFlags & FILE_SUPPORTS_EXTENDED_ATTRIBUTES))
-			{
-				fwprintf(stderr, L"\nWARNING: The specified volume %s does not support Extended Attributes. We won't be able to find any of those then!\n\n", volume);
-				// ignore this inability, so we can scan network drives, etc. anyway.
-			}
-		}
-        else if (searchPath[4 + 1] == L':')
+        if (searchPath[4 + 1] == L':')
         {
             // User very probably specified a '\\?\D:\...' UNC path. Check the drive letter in there.
             fsFlags = 0;
