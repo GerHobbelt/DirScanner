@@ -9,6 +9,7 @@
 #include <time.h>       /* clock_t, clock, CLOCKS_PER_SEC */
 #include <algorithm>
 #include <assert.h>
+#include <string>
 
 #include "ntfs_ads_io.h"
 
@@ -22,6 +23,10 @@
 #undef MAX_PATH
 #define MAX_PATH     1500
 
+
+using namespace std;
+
+
 static void barf_on_assert_failure(const char *msg)
 {                                   
     fprintf(stderr, "assertion failed: %s\n", msg); 
@@ -33,6 +38,102 @@ static void barf_on_assert_failure(const char *msg)
     {                                   \
         barf_on_assert_failure(#t);     \
     }      
+
+template <class T>
+class stringbuffer
+{
+public:
+	stringbuffer(size_t _size = 0)
+	{
+		reserve(_size);
+	}
+
+	~stringbuffer()
+	{
+		if (buf != prepbuf)
+		{
+			free(buf);
+		}
+	}
+
+	void reserve(size_t _size = 0)
+	{
+		_size++;  // account for space of extra NUL sentinel 
+		ASSERT(_size < ((DWORD)~0LL));
+
+		if (_size < size)
+			return;
+
+		if (_size <= MAX_PATH + 1)
+		{
+			buf = prepbuf;
+			size = MAX_PATH + 1;
+		}
+		else
+		{
+			buf = (T *)malloc(_size * sizeof(T));
+			if (!buf)
+			{
+				fwprintf(stderr, L"FATAL: Out of memory.\n");
+				exit(666);
+			}
+			size = (DWORD)_size;
+		}
+
+		buf[0] = 0;
+		buf[size - 1] = 0;
+		buf[size - 2] = 0;
+	}
+	
+	// reserve space for stuff we're about to append
+	void reserve_extra(size_t add)
+	{
+		add += wcslen(buf);
+		reserve(add);
+	}
+
+	operator T *() 
+	{
+		return buf;
+	}
+	const T *c_str() const
+	{
+		return buf;
+	}
+	T *data() const
+	{
+		return buf;
+	}
+
+	DWORD space() const
+	{
+		// we're tricking any using code by telling them the space available is less than reality:
+		// this way we can be pretty sure our NUL sentinel will survive.
+		// (unless the calling code does buffer overflows for a living)
+		return size - 1;
+	}
+
+	stringbuffer<T> &
+	operator =(const WCHAR *str)
+	{
+		auto l = wcslen(str);
+		reserve(l);
+		wcscpy_s(buf, size, str);
+		return *this;
+	}
+
+protected:
+	T prepbuf[MAX_PATH + 1];		// optimization: don't have to allocate when we need this much, or less...
+
+	T *    buf  {nullptr};
+	DWORD  size {0};
+};
+
+
+typedef stringbuffer<char>    charbuffer;
+typedef stringbuffer<wchar_t> wcharbuffer;
+
+
 
 static NtQueryInformationFile_f NtQueryInformationFile;
 static RtlNtStatusToDosError_f RtlNtStatusToDosError;
@@ -47,13 +148,13 @@ static RtlNtStatusToDosError_f RtlNtStatusToDosError;
 
 #define PRIME_MODULUS    16769023
 
-typedef struct
+typedef struct HashtableEntry
 {
-    uint32_t hash;
-    DWORD attrs;
-    WCHAR* path;
-    uint64_t filesize;
-	FILETIME timestamp;
+	uint32_t hash			{0};
+    DWORD attrs				{0};
+    wstring path;
+    uint64_t filesize       {0};
+	FILETIME timestamp		{0};
 } HashtableEntry;
 
 
@@ -118,7 +219,7 @@ void PrintWin32Error(DWORD ErrorCode)
 // Enables the load driver privilege
 //
 //----------------------------------------------------------------------
-BOOL EnableTokenPrivilege(LPCTSTR PrivilegeName)
+BOOL EnableTokenPrivilege(LPCWSTR PrivilegeName)
 {
     TOKEN_PRIVILEGES tp;
     LUID luid;
@@ -390,14 +491,13 @@ const CHAR *FileAttributes2String(CHAR attr_str[32], DWORD attrs)
     return attr_str;
 }
 
-const CHAR* FileSize2String(CHAR fsize_str[32], uint64_t filesize)
+void FileSize2String(CHAR fsize_str[32], uint64_t filesize)
 {
     snprintf(fsize_str, 32, "%21I64u", filesize);
     ASSERT(strnlen(fsize_str, 32) < 32);
-    return fsize_str;
 }
 
-const CHAR* FileTime2String(CHAR fsize_str[32], FILETIME timestamp)
+void FileTime2String(CHAR fsize_str[32], FILETIME timestamp)
 {
 	FILETIME localtime;
 	SYSTEMTIME tm;
@@ -407,13 +507,11 @@ const CHAR* FileTime2String(CHAR fsize_str[32], FILETIME timestamp)
 	{
 		snprintf(fsize_str, 32, "%04u-%02u-%02uT%02u:%02u:%02u.%04u", tm.wYear, tm.wMonth, tm.wDay, tm.wHour, tm.wMinute, tm.wSecond, tm.wMilliseconds);
 		ASSERT(strnlen(fsize_str, 32) < 32);
-		return fsize_str;
 	}
 	else
 	{
 		strcpy(fsize_str, "---INVALID-TIMESTAMP---");
 		ASSERT(strnlen(fsize_str, 32) < 32);
-		return fsize_str;
 	}
 }
 
@@ -438,8 +536,9 @@ unsigned int CalculateHash(const WCHAR* str)
 // Make sure all path separators are windows standard: '\'.
 // Also reduce duplicate path separators, e.g. '//' and '///' into single ones: '\'
 // Rewrites string IN-PLACE.
-void NormalizePathSeparators(WCHAR* str)
+void NormalizePathSeparators(wcharbuffer &src)
 {
+	WCHAR *str = src;
     WCHAR* start = str;
     WCHAR* dst = str;
     while (*str)
@@ -466,10 +565,10 @@ void NormalizePathSeparators(WCHAR* str)
 
 
 
-void CvtUTF16ToUTF8(char* dst, size_t dstlen, const WCHAR* src)
+void CvtUTF16ToUTF8(charbuffer &dst, const WCHAR* src)
 {
     // https://docs.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-widechartomultibyte
-    int len = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS | WC_NO_BEST_FIT_CHARS,src, -1, NULL, 0, NULL, NULL);
+    int len = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS | WC_NO_BEST_FIT_CHARS, src, -1, NULL, 0, NULL, NULL);
     if (len == 0)
     {
         fwprintf(stderr, L"\rWARNING: Error while converting string to UTF8 for output to file. The data will be sanitized!\n    Offending string: \"%s\"\n", src);
@@ -477,15 +576,17 @@ void CvtUTF16ToUTF8(char* dst, size_t dstlen, const WCHAR* src)
         len = WideCharToMultiByte(CP_UTF8, WC_NO_BEST_FIT_CHARS, src, -1, NULL, 0, NULL, NULL);
         cvtErrors++;
     }
-    if (len >= (int)dstlen)
-    {
-        fwprintf(stderr, L"\rERROR: The UTF8 encoded string is too large: %d doesn't fit into the %zu byte buffer. The data will be truncated!\n    Offending string: \"%s\"\n", len, dstlen, src);
+	dst.reserve(len + 8 /* a little slack + space for terminating sentinel */ );
+#if 0
+	{
+        fwprintf(stderr, L"\rERROR: The UTF8 encoded string is too large: %d doesn't fit into the %zu byte buffer. The data will be truncated!\n    Offending string: \"%s\"\n", len, dst.space(), src);
         cvtErrors++;
     }
-    
-    dst[0] = 0;
-    int rv = WideCharToMultiByte(CP_UTF8, WC_NO_BEST_FIT_CHARS, src, -1, dst, (int)dstlen, NULL, NULL);
-    dst[dstlen - 1] = 0;
+#endif
+
+	char *p = dst;
+    p[0] = 0;
+    int rv = WideCharToMultiByte(CP_UTF8, WC_NO_BEST_FIT_CHARS, src, -1, p, (int)dst.space(), NULL, NULL);
     if (rv == 0)
     {
         fwprintf(stderr, L"\rERROR: Error while converting string to UTF8 for output to file.\n    Offending string: \"%s\"\n", src);
@@ -507,14 +608,14 @@ void CloseOutput(void)
             HashtableEntry *slot = &OutputFilePaths[i];
             if (!slot->hash)
                 continue;
-            ASSERT(slot->path != NULL);
+            ASSERT(slot->path.c_str() != NULL);
 
             // write filename as UTF8 and check it for sanity while we do:
-            char fname[MAX_PATH + 1];
-            CvtUTF16ToUTF8(fname, sizeof(fname), slot->path);
+            charbuffer fname;
+            CvtUTF16ToUTF8(fname, slot->path.c_str());
             if (conciseOutput)
             {
-                fprintf(output, "%s\n", fname);
+                fprintf(output, "%s\n", fname.c_str());
             }
             else
             {
@@ -527,15 +628,13 @@ void CloseOutput(void)
 				FileSize2String(fsize_str, slot->filesize);
 				FileTime2String(time_str, slot->timestamp);
 
-                fprintf(output, "$%08lx:%s %s %s %s\n", (unsigned long)attrs, attr_str, fsize_str, time_str, fname);
+                fprintf(output, "$%08lx:%s %s %s %s\n", (unsigned long)attrs, attr_str, fsize_str, time_str, fname.c_str());
             }
-
-            free(slot->path);
         }
 
         fclose(output);
 
-        memset(OutputFilePaths, 0, sizeof(OutputFilePaths));
+        //memset(OutputFilePaths, 0, sizeof(OutputFilePaths));
     }
     output = NULL;
 }
@@ -547,9 +646,9 @@ int TestAndAddInHashtable(const WCHAR* str, const DWORD attrs, uint64_t filesize
     unsigned int idx = hash - 1;
     HashtableEntry* slot = &UniqueFilePaths[idx];
 
-    while (slot->path)
+    while (slot->hash)
     {
-        if (!wcscmp(slot->path, str))
+        if (slot->path == str)
             return 1;                   // 1: exists already
         do {
             // jump and test next viable slot
@@ -561,7 +660,7 @@ int TestAndAddInHashtable(const WCHAR* str, const DWORD attrs, uint64_t filesize
 
     assert(!slot->hash);
     slot->hash = hash;
-    slot->path = _wcsdup(str);
+    slot->path = str;
     slot->attrs = attrs;
     slot->filesize = filesize;
 	slot->timestamp = timestamp;
@@ -573,13 +672,13 @@ int TestAndAddInHashtable(const WCHAR* str, const DWORD attrs, uint64_t filesize
 // Return TRUE when file is hardlinked at least once, i.e. has two paths on the disk AT LEAST.
 BOOL FileHasMultipleInstances(const WCHAR* FileName)
 {
-    WCHAR linkPath[MAX_PATH];
+	wcharbuffer linkPath(wcslen(FileName));
     int linkCount = 0;
-    DWORD slen = nelem(linkPath);
+    DWORD slen = linkPath.space();
     HANDLE fnameHandle = FindFirstFileNameW(FileName, 0, &slen, linkPath);
     if (fnameHandle != INVALID_HANDLE_VALUE)
     {
-        slen = nelem(linkPath);
+        slen = linkPath.space();
         if (FindNextFileNameW(fnameHandle, &slen, linkPath))
         {
             linkCount++;
@@ -596,7 +695,7 @@ struct ADS_CHECK_REPORTDATA {
 	unsigned int additionalStreamCount  {0};
 	BOOLEAN hasOpenError                {FALSE};
 	DWORD error                         {ERROR_SUCCESS};
-	WCHAR errorMessage[MAX_PATH + 2000] {0};
+	wcharbuffer errorMessage;
 
 	~ADS_CHECK_REPORTDATA() 
 	{
@@ -625,7 +724,8 @@ BOOL FileHasADS(const WCHAR* FileName, ADS_CHECK_REPORTDATA &report)
 	if (fileHandle == INVALID_HANDLE_VALUE)
 	{
 		report.hasOpenError = TRUE;
-		swprintf(report.errorMessage, nelem(report.errorMessage), L"Error opening \"%s\" for reading ADS info", FileName);
+		report.errorMessage.reserve(wcslen(FileName) + 100);
+		swprintf(report.errorMessage, report.errorMessage.space(), L"Error opening \"%s\" for reading ADS info", FileName);
 		report.error = GetLastError();
 		ASSERT(report.error != ERROR_SUCCESS);
 	}
@@ -641,7 +741,8 @@ BOOL FileHasADS(const WCHAR* FileName, ADS_CHECK_REPORTDATA &report)
 		PFILE_STREAM_INFORMATION streamInfo = (PFILE_STREAM_INFORMATION)malloc(streamInfoSize);
 		if (streamInfo == nullptr)
 		{
-			swprintf(report.errorMessage, nelem(report.errorMessage), L"ERROR: Out of memory while allocating %lu bytes space for file stream info while inpecting \"%s\"", streamInfoSize, FileName);
+			report.errorMessage.reserve(wcslen(FileName) + 200);
+			swprintf(report.errorMessage, report.errorMessage.space(), L"ERROR: Out of memory while allocating %lu bytes space for file stream info while inpecting \"%s\"", streamInfoSize, FileName);
 			report.error = GetLastError();
 			ASSERT(report.error != ERROR_SUCCESS);
 			status = ERROR_NOT_ENOUGH_MEMORY | ERROR_SEVERITY_ERROR | APPLICATION_ERROR_MASK;
@@ -661,7 +762,8 @@ BOOL FileHasADS(const WCHAR* FileName, ADS_CHECK_REPORTDATA &report)
 				streamInfo = (PFILE_STREAM_INFORMATION)malloc(streamInfoSize);
 				if (streamInfo == nullptr)
 				{
-					swprintf(report.errorMessage, nelem(report.errorMessage), L"ERROR: Out of memory while allocating %lu bytes space for file stream info while inpecting \"%s\"", streamInfoSize, FileName);
+					report.errorMessage.reserve(wcslen(FileName) + 200);
+					swprintf(report.errorMessage, report.errorMessage.space(), L"ERROR: Out of memory while allocating %lu bytes space for file stream info while inpecting \"%s\"", streamInfoSize, FileName);
 					report.error = GetLastError();
 					ASSERT(report.error != ERROR_SUCCESS);
 					status = ERROR_NOT_ENOUGH_MEMORY | ERROR_SEVERITY_ERROR | APPLICATION_ERROR_MASK;
@@ -717,7 +819,8 @@ BOOL FileHasADS(const WCHAR* FileName, ADS_CHECK_REPORTDATA &report)
 		}
 		else if (!NT_SUCCESS(status) && status != (ERROR_NOT_ENOUGH_MEMORY | ERROR_SEVERITY_ERROR | APPLICATION_ERROR_MASK) /* this one will already have been reported */ )
 		{
-			swprintf(report.errorMessage, nelem(report.errorMessage), L"Error while inspecting \"%s\"", FileName);
+			report.errorMessage.reserve(wcslen(FileName) + 100);
+			swprintf(report.errorMessage, report.errorMessage.space(), L"Error while inspecting \"%s\"", FileName);
 			report.error = RtlNtStatusToDosError(status);
 		}
 		free(streamInfo);
@@ -795,7 +898,7 @@ void ShowProgress(void)
 // Queries a file to obtain stream information.
 //
 //--------------------------------------------------------------------
-uint64_t ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDirectory, DWORD mandatoryAttribs, DWORD wantedAnyAttribs, DWORD rejectedAttribs, BOOLEAN showLinks, BOOLEAN reportDiskUsage, int showADS)
+uint64_t ProcessFile(const WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN IsDirectory, DWORD mandatoryAttribs, DWORD wantedAnyAttribs, DWORD rejectedAttribs, BOOLEAN showLinks, BOOLEAN reportDiskUsage, int showADS)
 {
     WIN32_FILE_ATTRIBUTE_DATA attr_data = { INVALID_FILE_ATTRIBUTES };
 	
@@ -876,29 +979,31 @@ uint64_t ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN 
         {
             if (!TestAndAddInHashtable(FileName, attrs, filesize, latest_time, UniqueFilePaths))
             {
-                WCHAR linkPath[MAX_PATH];
-                WCHAR fullPath[MAX_PATH];
-                DWORD slen = nelem(linkPath);
+                wcharbuffer linkPath(wcslen(FileName));
+                wcharbuffer fullPath;
+                DWORD slen = linkPath.space();
                 HANDLE fnameHandle = FindFirstFileNameW(FileName, 0, &slen, linkPath);
                 if (fnameHandle != INVALID_HANDLE_VALUE)
                 {
                     if (wcscmp(linkPath, FileName + 6 /* skip \\?\X: long filename prefix plus drive part as that is not present in the link path */))
                     {
-                        wcsncpy_s(fullPath, FileName, 6);
-                        wcsncat_s(fullPath, linkPath, nelem(fullPath));
+						fullPath.reserve(wcslen(linkPath) + 6);
+                        wcsncpy_s(fullPath.data(), fullPath.space(), FileName, 6);
+                        wcscat_s(fullPath.data(), fullPath.space(), linkPath);
                         TestAndAddInHashtable(fullPath, attrs | FILE_ATTRIBUTE_HARDLINK, filesize, latest_time, UniqueFilePaths);
                     }
 
-                    slen = nelem(linkPath);
+                    slen = linkPath.space();
                     while (FindNextFileNameW(fnameHandle, &slen, linkPath))
                     {
                         if (wcscmp(linkPath, FileName + 6 /* skip \\?\X: long filename prefix plus drive part as that is not present in the link path */))
                         {
-                            wcsncpy_s(fullPath, FileName, 6);
-                            wcsncat_s(fullPath, linkPath, nelem(fullPath));
+							fullPath.reserve(wcslen(linkPath) + 6);
+							wcsncpy_s(fullPath.data(), fullPath.space(), FileName, 6);
+                            wcscat_s(fullPath.data(), fullPath.space(), linkPath);
                             TestAndAddInHashtable(fullPath, attrs | FILE_ATTRIBUTE_HARDLINK, filesize, latest_time, UniqueFilePaths);
                         }
-                        slen = nelem(linkPath);
+                        slen = linkPath.space();
                     }
                     FindClose(fnameHandle);
                 }
@@ -987,9 +1092,9 @@ uint64_t ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN 
 
 			if (showLinks && !output)
 			{
-				WCHAR linkPath[MAX_PATH];
+				wcharbuffer linkPath(wcslen(FileName));
 				int linkCount = 0;
-				DWORD slen = nelem(linkPath);
+				DWORD slen = linkPath.space();
 				HANDLE fnameHandle = FindFirstFileNameW(FileName, 0, &slen, linkPath);
 				if (fnameHandle == INVALID_HANDLE_VALUE)
 				{
@@ -1000,18 +1105,18 @@ uint64_t ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN 
 				{
 					if (wcscmp(linkPath, FileName + 6 /* skip \\?\X: long filename prefix plus drive part as that is not present in the link path */))
 					{
-						fwprintf(stdout, L"\r#--Link: %2.2s%s\n", FileName + 4, linkPath);
+						fwprintf(stdout, L"\r#--Link: %2.2s%s\n", FileName + 4, linkPath.c_str());
 					}
 					linkCount++;
 
-					slen = nelem(linkPath);
+					slen = linkPath.space();
 					while (FindNextFileNameW(fnameHandle, &slen, linkPath))
 					{
 						if (wcscmp(linkPath, FileName + 6 /* skip \\?\X: long filename prefix plus drive part as that is not present in the link path */))
 						{
-							fwprintf(stdout, L"\r#--Link: %2.2s%s\n", FileName + 4, linkPath);
+							fwprintf(stdout, L"\r#--Link: %2.2s%s\n", FileName + 4, linkPath.c_str());
 						}
-						slen = nelem(linkPath);
+						slen = linkPath.space();
 						linkCount++;
 					}
 					// EVERY file has ONE "hardlink" at least. UNIX-like "hardlinked files" have MULTIPLE sites:
@@ -1035,7 +1140,7 @@ uint64_t ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN 
 				{
 					if (!ADS_report.hasOpenError || !IsDirectory || PrintDirectoryOpenErrors)
 					{
-						fwprintf(stderr, L"\r%s:\n", ADS_report.errorMessage);
+						fwprintf(stderr, L"\r%s:\n", ADS_report.errorMessage.c_str());
 						PrintWin32Error(ADS_report.error);
 					}
 				}
@@ -1045,16 +1150,16 @@ uint64_t ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN 
 					ASSERT(ADS_report.streamInfoSize > 0);
 					PFILE_STREAM_INFORMATION streamInfoPtr = ADS_report.streamInfo;
 					PFILE_STREAM_INFORMATION streamInfoPtrEOF = (PFILE_STREAM_INFORMATION)(((BYTE *)ADS_report.streamInfo) + ADS_report.streamInfoSize);
-					WCHAR    streamName[MAX_PATH + 1];
-					WCHAR    fullStreamName[MAX_PATH + 1];
+					wcharbuffer streamName;
+					wcharbuffer fullStreamName;
 
 					while (streamInfoPtr < streamInfoPtrEOF)
 					{
-						ULONG nameLen = std::min((ULONG)sizeof(streamName), streamInfoPtr->StreamNameLength);
+						ULONG nameLen = streamInfoPtr->StreamNameLength;
 						if (streamInfoPtr->StreamNameLength > 0)
 						{
-							ASSERT(streamInfoPtr->StreamNameLength == nameLen);
-							memcpy(streamName, streamInfoPtr->StreamName, nameLen);
+							streamName.reserve(nameLen);
+							memcpy(streamName.data(), streamInfoPtr->StreamName, nameLen);
 						}
 						streamName[nameLen / 2] = 0;
 
@@ -1063,17 +1168,18 @@ uint64_t ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN 
 						//
 						if (_wcsicmp(streamName, L"::$DATA"))
 						{
-							fwprintf(stdout, L"   %24s\t%21I64d\n", streamName, streamInfoPtr->StreamSize.QuadPart);
+							fwprintf(stdout, L"   %24s\t%21I64d\n", streamName.c_str(), streamInfoPtr->StreamSize.QuadPart);
 
-							swprintf(fullStreamName, nelem(fullStreamName), L"%s%s", FileName, streamName);
-							fullStreamName[nelem(fullStreamName) - 1] = 0;
+							fullStreamName.reserve(wcslen(FileName) + wcslen(streamName) + 1);
+							swprintf(fullStreamName, fullStreamName.space(), L"%s%s", FileName, streamName.c_str());
+							//fullStreamName[fullStreamName.space() - 1] = 0;
 							HANDLE adsFileHandle = CreateFile(fullStreamName, GENERIC_READ,
 								FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
 								OPEN_EXISTING,
 								FILE_FLAG_BACKUP_SEMANTICS, 0);
 							if (adsFileHandle == INVALID_HANDLE_VALUE)
 							{
-								fwprintf(stderr, L"\rError opening ADS stream \"%s\":\n", fullStreamName);
+								fwprintf(stderr, L"\rError opening ADS stream \"%s\":\n", fullStreamName.c_str());
 								PrintWin32Error(GetLastError());
 							}
 							else
@@ -1082,7 +1188,7 @@ uint64_t ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN 
 								BYTE* content = (BYTE *)malloc(content_len + 8);
 								if (content == nullptr)
 								{
-									fwprintf(stderr, L"\rERROR: Out of memory while allocating %lu bytes space for file stream info while inspecting ADS stream \"%s\":\n", ADS_report.streamInfoSize, fullStreamName);
+									fwprintf(stderr, L"\rERROR: Out of memory while allocating %lu bytes space for file stream info while inspecting ADS stream \"%s\":\n", ADS_report.streamInfoSize, fullStreamName.c_str());
 									PrintWin32Error(GetLastError());
 								}
 								else
@@ -1092,7 +1198,7 @@ uint64_t ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN 
 									BOOL rv = ReadFile(adsFileHandle, content, (DWORD)content_len + 4, &actual_len, NULL);
 									if (!rv)
 									{
-										fwprintf(stderr, L"   Error reading ADS stream \"%s\":\n", fullStreamName);
+										fwprintf(stderr, L"   Error reading ADS stream \"%s\":\n", fullStreamName.c_str());
 										PrintWin32Error(GetLastError());
 										free(content);
 										content = NULL;
@@ -1102,7 +1208,7 @@ uint64_t ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN 
 									{
 										if (actual_len != content_len)
 										{
-											fwprintf(stderr, L"   Warning: actual length %zu != expected length %zu for \"%s\".\n", (size_t)actual_len, content_len, fullStreamName);
+											fwprintf(stderr, L"   Warning: actual length %zu != expected length %zu for \"%s\".\n", (size_t)actual_len, content_len, fullStreamName.c_str());
 										}
 										memset(content + actual_len, 0, 4);
 
@@ -1196,46 +1302,49 @@ uint64_t ProcessFile(WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BOOLEAN 
 // function.
 //
 //--------------------------------------------------------------------
-uint64_t ProcessDirectory(WCHAR* PathName, WCHAR* SearchPattern, size_t SearchPatternSize,
+uint64_t ProcessDirectory(wcharbuffer &PathName, wcharbuffer &SearchPattern,
     BOOLEAN Recurse, DWORD mandatoryAttribs, DWORD wantedAnyAttribs, DWORD rejectedAttribs, BOOLEAN showLinks, BOOLEAN reportDiskUsage, int showADS, int dirTreeDepth)
 {
-    WCHAR			subName[MAX_PATH];
-    WCHAR			fileSearchName[MAX_PATH];
-    WCHAR			searchName[MAX_PATH];
+    wcharbuffer		subName;
+	wcharbuffer		fileSearchName;
+	wcharbuffer		searchName;
     HANDLE			dirHandle = INVALID_HANDLE_VALUE;
     HANDLE			patternHandle;
     BOOLEAN	        firstCall = (SearchPattern[0] == 0);
     WIN32_FIND_DATA foundFile;
 	uint64_t        diskSpaceCost = 0;
 	uint64_t        diskSpaceCostWithoutSubDirCosts;
+	auto            PathNameLen = wcslen(PathName);
 
     //
     // Scan the files and/or directories if this is a directory
     //
     if (firstCall)
     {
-        if (PathName[wcslen(PathName) - 1] == L'\\')
+        if (PathName[PathNameLen - 1] == L'\\')
         {
-            PathName[wcslen(PathName) - 1] = 0;
+            PathName[PathNameLen - 1] = 0;
+			PathNameLen--;
         }
 
         if (wcsrchr(PathName, '*'))
         {
-            LPTSTR fns = wcsrchr(PathName, '\\');
+            LPWSTR fns = wcsrchr(PathName, '\\');
             if (fns)
             {
-                swprintf(SearchPattern, SearchPatternSize, fns + 1);
-                wcscpy_s(searchName, PathName);
+                SearchPattern = fns + 1;
+                searchName = PathName;
+				searchName.reserve(PathNameLen + 4);		// make sure there's space for the wildcards we're about to append
                 LPTSTR last = wcsrchr(searchName, '\\');
                 ASSERT(last != NULL);
-                wcscpy_s(last + 1, nelem(searchName) - (last + 1 - searchName), L"*.*");
+                wcscpy_s(last + 1, searchName.space() - (last + 1 - searchName), L"*.*");
             }
             else
             {
-                swprintf(SearchPattern, SearchPatternSize, PathName);
-                wcscpy_s(searchName, PathName);
+                SearchPattern = PathName;
+				searchName = PathName;
             }
-            swprintf(fileSearchName, nelem(fileSearchName), L"%s", PathName);
+            fileSearchName = PathName;
         }
         else
         {
@@ -1250,25 +1359,27 @@ uint64_t ProcessDirectory(WCHAR* PathName, WCHAR* SearchPattern, size_t SearchPa
 
             if (is_dir)
             {
-                swprintf(SearchPattern, SearchPatternSize, L"*.*");
+                SearchPattern = L"*.*";
 
                 if (Recurse)
                 {
-                    swprintf(searchName, nelem(searchName), L"%s\\*.*", PathName);
-                    swprintf(fileSearchName, nelem(fileSearchName), L"%s\\*.*", PathName);
+					searchName.reserve(PathNameLen + 4);
+					fileSearchName.reserve(PathNameLen + 4);
+					swprintf(searchName, searchName.space(), L"%s\\*.*", PathName.c_str());
+                    swprintf(fileSearchName, fileSearchName.space(), L"%s\\*.*", PathName.c_str());
                 }
                 else
                 {
-                    swprintf(searchName, nelem(searchName), L"%s", PathName);
-                    swprintf(fileSearchName, nelem(fileSearchName), L"%s", PathName);
+                    searchName = PathName;
+                    fileSearchName = PathName;
                 }
             }
             else
             {
-                WCHAR *dirEnd = wcsrchr(PathName, '\\');
+                const WCHAR * dirEnd = wcsrchr(PathName, '\\');
                 if (!dirEnd)
                     dirEnd = wcsrchr(PathName, ':');
-                WCHAR* basename;
+                const WCHAR * basename;
                 if (dirEnd)
                     basename = dirEnd + 1;
                 else
@@ -1277,25 +1388,29 @@ uint64_t ProcessDirectory(WCHAR* PathName, WCHAR* SearchPattern, size_t SearchPa
                     basename = PathName;
                 }
 
-                swprintf(SearchPattern, SearchPatternSize, basename);
+                SearchPattern = basename;
 
                 if (Recurse)
                 {
-                    swprintf(searchName, nelem(searchName), L"%.*s\\*.*", (int)(dirEnd - PathName), PathName);
-                    swprintf(fileSearchName, nelem(fileSearchName), L"%s", PathName);
+					searchName.reserve(PathNameLen + 4);
+					fileSearchName.reserve(PathNameLen + 4);
+					swprintf(searchName, searchName.space(), L"%.*s\\*.*", (int)(dirEnd - PathName.c_str()), PathName.c_str());
+                    swprintf(fileSearchName, fileSearchName.space(), L"%s", PathName.c_str());
                 }
                 else
                 {
-                    swprintf(searchName, nelem(searchName), L"%s", PathName);
-                    swprintf(fileSearchName, nelem(fileSearchName), L"%s", PathName);
+                    searchName = PathName;
+                    fileSearchName = PathName;
                 }
             }
         }
     }
     else
     {
-        swprintf(searchName, nelem(searchName), L"%s\\*.*", PathName);
-        swprintf(fileSearchName, nelem(fileSearchName), L"%s\\%s", PathName, SearchPattern);
+		searchName.reserve(PathNameLen + 4);
+		fileSearchName.reserve(PathNameLen + wcslen(SearchPattern) + 1);
+		swprintf(searchName, searchName.space(), L"%s\\*.*", PathName.c_str());
+        swprintf(fileSearchName, fileSearchName.space(), L"%s\\%s", PathName.c_str(), SearchPattern.c_str());
     }
 
     //
@@ -1308,12 +1423,13 @@ uint64_t ProcessDirectory(WCHAR* PathName, WCHAR* SearchPattern, size_t SearchPa
             if (wcscmp(foundFile.cFileName, L".") &&
                 wcscmp(foundFile.cFileName, L".."))
             {
-                wcscpy_s(subName, searchName);
-                LPTSTR fn = wcsrchr(subName, '\\');
+                subName = searchName;
+				subName.reserve_extra(wcslen(foundFile.cFileName));
+				LPWSTR fn = wcsrchr(subName, '\\');
                 if (fn)
-                    wcscpy_s(fn + 1, nelem(subName) - (fn + 1 - subName), foundFile.cFileName);
+                    wcscpy_s(fn + 1, subName.space() - (fn + 1 - subName), foundFile.cFileName);
                 else
-                    wcscpy_s(subName, foundFile.cFileName);
+                    subName = foundFile.cFileName;
 
                 //
                 // Do this file/directory
@@ -1379,19 +1495,20 @@ uint64_t ProcessDirectory(WCHAR* PathName, WCHAR* SearchPattern, size_t SearchPa
                 wcscmp(foundFile.cFileName, L".") &&
                 wcscmp(foundFile.cFileName, L".."))
             {
-                wcscpy_s(subName, searchName);
-                LPTSTR fns = wcsrchr(subName, '\\');
+                subName = searchName;
+				subName.reserve_extra(wcslen(foundFile.cFileName));
+                LPWSTR fns = wcsrchr(subName, '\\');
                 if (fns)
-                    wcscpy_s(fns + 1, nelem(subName) - (fns + 1 - subName), foundFile.cFileName);
+                    wcscpy_s(fns + 1, subName.space() - (fns + 1 - subName), foundFile.cFileName);
                 else
-                    wcscpy_s(subName, foundFile.cFileName);
+                    subName = foundFile.cFileName;
 
                 //
                 // Go into this directory
                 //
                 ShowProgress();
 
-				diskSpaceCost += ProcessDirectory(subName, SearchPattern, SearchPatternSize, Recurse, mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks, reportDiskUsage, showADS, dirTreeDepth + 1);
+				diskSpaceCost += ProcessDirectory(subName, SearchPattern, Recurse, mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks, reportDiskUsage, showADS, dirTreeDepth + 1);
             }
         } while (FindNextFile(dirHandle, &foundFile));
     }
@@ -1409,9 +1526,9 @@ finish:
 }
 
 
-int Usage(WCHAR* ProgramName)
+int Usage(const WCHAR* ProgramName)
 {
-    WCHAR* baseName = wcsrchr(ProgramName, '\\');
+    const WCHAR* baseName = wcsrchr(ProgramName, '\\');
     if (!baseName)
         baseName = wcsrchr(ProgramName, '//');
     if (!baseName)
@@ -1505,9 +1622,9 @@ int wmain(int argc, WCHAR* argv[])
 	DWORD       mandatoryAttribs = 0;
     DWORD       wantedAnyAttribs = 0;
     DWORD       rejectedAttribs = 0;
-    WCHAR       searchPattern[MAX_PATH];
-    WCHAR		searchPath[MAX_PATH];
-    WCHAR		listOutputPath[MAX_PATH];
+    wcharbuffer     searchPattern;
+	wcharbuffer		searchPath;
+	wcharbuffer		listOutputPath;
 	uint64_t    diskSpaceCost = 0;
     int         i;
 
@@ -1561,8 +1678,8 @@ int wmain(int argc, WCHAR* argv[])
         }
     }
 
-    memset(UniqueFilePaths, 0, sizeof(UniqueFilePaths));
-    memset(OutputFilePaths, 0, sizeof(OutputFilePaths));
+    //memset(UniqueFilePaths, 0, sizeof(UniqueFilePaths));
+    //memset(OutputFilePaths, 0, sizeof(OutputFilePaths));
 
     output = NULL;
     atexit(CloseOutput);
@@ -1614,17 +1731,17 @@ int wmain(int argc, WCHAR* argv[])
                 CloseOutput();
 
                 i++;
-                wcscpy_s(listOutputPath, argv[i]);
+                listOutputPath = argv[i];
                 NormalizePathSeparators(listOutputPath);
 
-                char fname[MAX_PATH + 1];
-                CvtUTF16ToUTF8(fname, sizeof(fname), listOutputPath);
+                charbuffer fname(listOutputPath.space() * 5);
+                CvtUTF16ToUTF8(fname, listOutputPath);
                 errno_t err = fopen_s(&output, fname, "w");
                 if (!output || err)
                 {
                     char msg[1024];
                     strerror_s(msg, errno);
-                    fwprintf(stderr, L"Unable to open file '%s' for writing: ", listOutputPath);
+                    fwprintf(stderr, L"Unable to open file '%s' for writing: ", listOutputPath.c_str());
                     fprintf(stderr, "%s.\n\n", msg);
                     return EXIT_FAILURE;
                 }
@@ -1648,7 +1765,7 @@ int wmain(int argc, WCHAR* argv[])
 		//
 		// Check if the specified path is a full UNC path:
 		const WCHAR *specPath = argv[i];
-		wcsncpy_s(searchPath, specPath, MAX_PATH - 1);
+		searchPath = specPath;
 		NormalizePathSeparators(searchPath);
 
 		if (wcsncmp(searchPath, L"\\\\?\\", 4) == 0)
@@ -1657,21 +1774,21 @@ int wmain(int argc, WCHAR* argv[])
 		}
 		else 
 		{
-			WCHAR buf[MAX_PATH] = {0};
-			wcsncpy_s(buf, specPath, MAX_PATH - 1);
+			wcharbuffer buf;
+			buf = specPath;
 			NormalizePathSeparators(buf);
 
 			// https://docs.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
-			wcsncpy_s(searchPath, L"\\\\?\\", 4);
+			wcsncpy_s(searchPath, searchPath.space(), L"\\\\?\\", 4);
 
 			PWCHAR filePart = NULL;
-			GetFullPathName(buf, MAX_PATH - 4, searchPath + 4, &filePart);
+			GetFullPathName(buf, searchPath.space() - 4, searchPath + 4, &filePart);
 			NormalizePathSeparators(searchPath);
 		}
 
         if (!quiet)
         {
-            fwprintf(stderr, L"Scanning: %s\n", searchPath);
+            fwprintf(stderr, L"Scanning: %s\n", searchPath.c_str());
         }
 
         //
@@ -1710,7 +1827,7 @@ int wmain(int argc, WCHAR* argv[])
         // Now go and process directories
         //
         searchPattern[0] = 0;           // signal initial call of this recursive function
-        diskSpaceCost += ProcessDirectory(searchPath, searchPattern, nelem(searchPattern), recurse, mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks, reportDiskUsage, showADS, 0);
+        diskSpaceCost += ProcessDirectory(searchPath, searchPattern, recurse, mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks, reportDiskUsage, showADS, 0);
     }
 
     CloseOutput();

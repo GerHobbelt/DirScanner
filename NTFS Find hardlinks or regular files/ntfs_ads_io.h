@@ -12,7 +12,9 @@
 
 
 // return number of elements
+#if 0
 #define nelem(a)     (sizeof(a) / sizeof((a)[0]))
+#endif
 
 //
 // Check for success
