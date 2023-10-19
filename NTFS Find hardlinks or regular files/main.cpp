@@ -20,8 +20,8 @@
 #if defined(MAX_PATH) && MAX_PATH > 1500
 #error "Bump our Large-File-Names-MAX_PATH replacement define at the line further below!"
 #endif
-#undef MAX_PATH
-#define MAX_PATH     1500
+//#undef MAX_PATH
+//#define MAX_PATH     1500
 
 
 using namespace std;
@@ -39,50 +39,129 @@ static void barf_on_assert_failure(const char *msg)
         barf_on_assert_failure(#t);     \
     }      
 
+
+
+// overloaded helpers for the stringbuffer template class:
+
+static inline void sb__strcpy__(wchar_t* dest, size_t dmax, const wchar_t* src)
+{
+	wcscpy_s(dest, dmax, src);
+}
+static inline void sb__strcpy__(char* dest, size_t dmax, const char* src)
+{
+	strcpy_s(dest, dmax, src);
+}
+
+
 template <class T>
 class stringbuffer
 {
 public:
-	stringbuffer(size_t _size = 0)
+	stringbuffer()
+	{
+		reserve();
+	}
+	stringbuffer(size_t _size)
 	{
 		reserve(_size);
 	}
 
 	~stringbuffer()
 	{
+		ASSERT(buf != nullptr);
 		if (buf != prepbuf)
 		{
 			free(buf);
 		}
 	}
 
+	//
+	// disallow the default copy constructor, copy assignment,
+	// move constructor, and move assignment functions: only allow
+	// our explicit implementation where available.
+	//
+
+	stringbuffer(const stringbuffer<T> &o) = delete;             
+	//stringbuffer<T> & operator=(const stringbuffer<T> &o) = delete; 
+	stringbuffer(stringbuffer<T> &&o) noexcept = delete;                  
+	stringbuffer<T> & operator=(stringbuffer<T> &&o) noexcept = delete;
+
 	void reserve(size_t _size = 0)
 	{
 		_size++;  // account for space of extra NUL sentinel 
 		ASSERT(_size < ((DWORD)~0LL));
 
+		// only grow...
 		if (_size < size)
 			return;
 
 		if (_size <= MAX_PATH + 1)
 		{
+			// we're being invoked from a constructor: alias the built-in buffer and be done.
+
 			buf = prepbuf;
 			size = MAX_PATH + 1;
+
+			buf[0] = 0;
+			buf[size - 1] = 0;
+			buf[size - 2] = 0;
 		}
-		else
+		else 
 		{
-			buf = (T *)malloc(_size * sizeof(T));
-			if (!buf)
+			// minor optimization: quantize the resized size to 64 byte chunks:
+			_size += 63;
+			_size &= ~63;  // _size MOD 64
+
+			if (buf == nullptr)
 			{
-				fwprintf(stderr, L"FATAL: Out of memory.\n");
-				exit(666);
+				// we're being invoked from a constructor: allocate and be done.
+
+				buf = (T *)malloc(_size * sizeof(T));
+				if (!buf)
+				{
+					fwprintf(stderr, L"FATAL: Out of memory.\n");
+					exit(666);
+				}
+
+				buf[0] = 0;
+				buf[_size - 1] = 0;
+				buf[_size - 2] = 0;
 			}
+			else if (buf == prepbuf)
+			{
+				// we're growing from prepbuf into a larger heap-allocated buffer:
+				// copy the content!
+			
+				buf = (T *)malloc(_size * sizeof(T));
+				if (!buf)
+				{
+					fwprintf(stderr, L"FATAL: Out of memory.\n");
+					exit(666);
+				}
+
+				buf[_size - 1] = 0;
+				buf[_size - 2] = 0;
+
+				sb__strcpy__(buf, _size, prepbuf);
+			}
+			else
+			{
+				// we're growing the heap-allocated space still further.
+
+				buf = (T *)realloc(buf, _size * sizeof(T));
+				if (!buf)
+				{
+					fwprintf(stderr, L"FATAL: Out of memory.\n");
+					exit(666);
+				}
+
+				// as we grow in steps of 64 bytes each, we can safely punch the double sentinel at the end of the new buffer again:
+				buf[_size - 1] = 0;
+				buf[_size - 2] = 0;
+			}
+
 			size = (DWORD)_size;
 		}
-
-		buf[0] = 0;
-		buf[size - 1] = 0;
-		buf[size - 2] = 0;
 	}
 	
 	// reserve space for stuff we're about to append
@@ -113,13 +192,21 @@ public:
 		return size - 1;
 	}
 
-	stringbuffer<T> &
-	operator =(const WCHAR *str)
+	stringbuffer<T> & operator =(const WCHAR *str)
 	{
 		auto l = wcslen(str);
 		reserve(l);
 		ASSERT(size > l);
 		wcscpy_s(buf, size, str);
+		return *this;
+	}
+
+	stringbuffer<T> & operator =(const stringbuffer<T> &src)
+	{
+		auto l = wcslen(src.c_str());
+		reserve(l);
+		ASSERT(size > l);
+		wcscpy_s(buf, size, src.c_str());
 		return *this;
 	}
 
@@ -698,7 +785,7 @@ BOOL FindNextFileNameW(_In_ HANDLE hFindStream, _Inout_ wcharbuffer &LinkName)
 // Return TRUE when file is hardlinked at least once, i.e. has two paths on the disk AT LEAST.
 BOOL FileHasMultipleInstances(const WCHAR* FileName)
 {
-	wcharbuffer linkPath(wcslen(FileName));
+	wcharbuffer linkPath;
     int linkCount = 0;
     HANDLE fnameHandle = FindFirstFileNameW(FileName, 0, linkPath);
 	if (fnameHandle != INVALID_HANDLE_VALUE)
@@ -1003,7 +1090,7 @@ uint64_t ProcessFile(const WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BO
         {
             if (!TestAndAddInHashtable(FileName, attrs, filesize, latest_time, UniqueFilePaths))
             {
-                wcharbuffer linkPath(wcslen(FileName));
+                wcharbuffer linkPath;
                 wcharbuffer fullPath;
                 HANDLE fnameHandle = FindFirstFileNameW(FileName, 0, linkPath);
                 if (fnameHandle != INVALID_HANDLE_VALUE)
@@ -1113,7 +1200,7 @@ uint64_t ProcessFile(const WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BO
 
 			if (showLinks && !output)
 			{
-				wcharbuffer linkPath(wcslen(FileName));
+				wcharbuffer linkPath;
 				int linkCount = 0;
 				HANDLE fnameHandle = FindFirstFileNameW(FileName, 0, linkPath);
 				if (fnameHandle == INVALID_HANDLE_VALUE)
@@ -1311,6 +1398,13 @@ uint64_t ProcessFile(const WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BO
 	return filesize;
 }
 
+struct DirResponse
+{
+	unsigned int    fileCount		{0};
+	unsigned int    directoryCount  {0};
+
+	uint64_t        diskSpaceCost   {0};
+};
 
 //--------------------------------------------------------------------
 //
@@ -1320,7 +1414,7 @@ uint64_t ProcessFile(const WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BO
 // function.
 //
 //--------------------------------------------------------------------
-uint64_t ProcessDirectory(wcharbuffer &PathName, wcharbuffer &SearchPattern,
+DirResponse ProcessDirectory(wcharbuffer &PathName, wcharbuffer &SearchPattern,
     BOOLEAN Recurse, DWORD mandatoryAttribs, DWORD wantedAnyAttribs, DWORD rejectedAttribs, BOOLEAN showLinks, BOOLEAN reportDiskUsage, int showADS, int dirTreeDepth)
 {
     wcharbuffer		subName;
@@ -1330,7 +1424,7 @@ uint64_t ProcessDirectory(wcharbuffer &PathName, wcharbuffer &SearchPattern,
     HANDLE			patternHandle;
     BOOLEAN	        firstCall = (SearchPattern[0] == 0);
     WIN32_FIND_DATA foundFile;
-	uint64_t        diskSpaceCost = 0;
+	DirResponse     counts;
 	uint64_t        diskSpaceCostWithoutSubDirCosts;
 	auto            PathNameLen = wcslen(PathName);
 
@@ -1453,8 +1547,20 @@ uint64_t ProcessDirectory(wcharbuffer &PathName, wcharbuffer &SearchPattern,
                 //
                 ShowProgress();
 
-				diskSpaceCost += ProcessFile(subName, foundFile,
-                    (BOOLEAN)!!(foundFile.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY), 
+				BOOLEAN is_dir = (BOOLEAN)!!(foundFile.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+
+				if (is_dir)
+				{
+					// make sure we don't count directories TWICE.
+					if (!Recurse)
+						counts.directoryCount++;
+				}
+				else
+				{
+					counts.fileCount++;
+				}
+
+				counts.diskSpaceCost += ProcessFile(subName, foundFile, is_dir, 
                     mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks, reportDiskUsage, showADS
                 );
             }
@@ -1462,7 +1568,7 @@ uint64_t ProcessDirectory(wcharbuffer &PathName, wcharbuffer &SearchPattern,
         FindClose(patternHandle);
     }
 
-	diskSpaceCostWithoutSubDirCosts = diskSpaceCost;
+	diskSpaceCostWithoutSubDirCosts = counts.diskSpaceCost;
 
     //
     // Now recurse if we're supposed to
@@ -1525,7 +1631,13 @@ uint64_t ProcessDirectory(wcharbuffer &PathName, wcharbuffer &SearchPattern,
                 //
                 ShowProgress();
 
-				diskSpaceCost += ProcessDirectory(subName, SearchPattern, Recurse, mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks, reportDiskUsage, showADS, dirTreeDepth + 1);
+				counts.directoryCount++;
+
+				auto rv = ProcessDirectory(subName, SearchPattern, Recurse, mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks, reportDiskUsage, showADS, dirTreeDepth + 1);
+
+				counts.diskSpaceCost += rv.diskSpaceCost;
+				counts.diskSpaceCost += rv.directoryCount;
+				counts.fileCount += rv.fileCount;
             }
         } while (FindNextFile(dirHandle, &foundFile));
     }
@@ -1536,10 +1648,10 @@ finish:
 	if (reportDiskUsage)
 	{
 		ClearProgress();
-		fwprintf(stdout, L"## Disk Usage............. %21I64u %21I64u @ Dirtree depth %6i ............................. %s\n", diskSpaceCost, diskSpaceCostWithoutSubDirCosts, dirTreeDepth, searchName + 4);
+		fwprintf(stdout, L"## Disk Usage............. %21I64u %21I64u @ Depth: %6i, Dirs: %8u, Files: %8u ... %s\n", counts.diskSpaceCost, diskSpaceCostWithoutSubDirCosts, dirTreeDepth, counts.directoryCount, counts.fileCount, searchName + 4);
 	}
 
-	return diskSpaceCost;
+	return counts;
 }
 
 
@@ -1642,7 +1754,7 @@ int wmain(int argc, WCHAR* argv[])
     wcharbuffer     searchPattern;
 	wcharbuffer		searchPath;
 	wcharbuffer		listOutputPath;
-	uint64_t    diskSpaceCost = 0;
+	DirResponse     totals;
     int         i;
 
     ticks = clock();
@@ -1844,7 +1956,10 @@ int wmain(int argc, WCHAR* argv[])
         // Now go and process directories
         //
         searchPattern[0] = 0;           // signal initial call of this recursive function
-        diskSpaceCost += ProcessDirectory(searchPath, searchPattern, recurse, mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks, reportDiskUsage, showADS, 0);
+        auto rv = ProcessDirectory(searchPath, searchPattern, recurse, mandatoryAttribs, wantedAnyAttribs, rejectedAttribs, showLinks, reportDiskUsage, showADS, 0);
+		totals.directoryCount += rv.directoryCount;
+		totals.fileCount += rv.fileCount;
+		totals.diskSpaceCost += rv.diskSpaceCost;
     }
 
     CloseOutput();
@@ -1863,7 +1978,7 @@ int wmain(int argc, WCHAR* argv[])
 	if (reportDiskUsage)
 	{
 		ClearProgress();
-		fwprintf(stdout, L"## Disk Usage............. %21I64u .......................................................................... (---TOTAL---)\n", diskSpaceCost);
+		fwprintf(stdout, L"## Disk Usage............. %21I64u ..................... @ .............. Dirs: %8u, Files: %8u ... (---TOTAL---)\n", totals.diskSpaceCost, totals.directoryCount, totals.fileCount);
 	}
 
     return 0;
