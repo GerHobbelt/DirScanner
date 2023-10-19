@@ -1667,21 +1667,22 @@ int Usage(const WCHAR* ProgramName)
     else
         baseName++;
 
-    fwprintf(stderr, L"\nDirScanner v1.3 - List directory contents including NTFS hardlinks\n");
+    fwprintf(stderr, L"\nDirScanner v1.4 - List directory contents including NTFS hardlinks\n");
     fwprintf(stderr, L"Copyright (C) 2021-2023 Ger Hobbelt\n");
     fwprintf(stderr, L"Some parts Copyright (C) 1999-2005 Mark Russinovich\n");
 
-    fwprintf(stderr, L"usage: %s [-s] [-m mask] [-r mask] [-w mask] [-o file] <file or directory> ...\n", baseName);
+    fwprintf(stderr, L"usage: %s [-s] [-m mask] [-r mask] [-w mask] [-o file] [-u] [-f filter] <file or directory> ...\n", baseName);
     fwprintf(stderr, L"-c     Concise output, i.e. do NOT print the attributes\n");
     fwprintf(stderr, L"-q     Quiet mode: no progress, no info lines\n");
     fwprintf(stderr, L"-s     Recurse subdirectories\n");
     fwprintf(stderr, L"-m     mask of attributes which are Mandatory (MUST HAVE)\n");
     fwprintf(stderr, L"-w     mask of attributes which are Wanted (MAY HAVE)\n");
     fwprintf(stderr, L"-r     mask of attributes which are Rejected (HAS NOT)\n\n");
-    fwprintf(stderr, L"-l     list all hardlink sites for every file which has multiple sites (hardlinks)\n");
+	fwprintf(stderr, L"-l     list all hardlink sites for every file which has multiple sites (hardlinks)\n");
 	fwprintf(stderr, L"-a     list all ADS (Advanced Data Streams) for each file. Repeat this option to also dump the streams' content.\n");
 	fwprintf(stderr, L"-o     write the collected list of paths to the specified file (SEMI-RANDOM HASH-based order)\n");
 	fwprintf(stderr, L"-u     Report disk usage per element. Directories report the total amount of storage taken up by all matched files within.\n");
+	fwprintf(stderr, L"-f     only output files (and/or disk usage lines) when filter criteria match\n\n");
 	fwprintf(stderr, L"\n");
     fwprintf(stderr, L"The M,W,R masks are processed as follows:\n"
             L"  mask & MUST(Mandatory) == MUST\n"
@@ -1736,6 +1737,48 @@ int Usage(const WCHAR* ProgramName)
 	fwprintf(stderr, L"      included in the reported sums. As such even an empty directory will report some minimal\n");
 	fwprintf(stderr, L"      cost.\n");
 	fwprintf(stderr, L"      Thus you can get a report similar to UNIX 'du', but advanced features built in.\n");
+	fwprintf(stderr, L"\n");
+	fwprintf(stderr, L"NOTE: '-f' filter expression is constructed as follows: it is a collection of 1 or more sets\n");
+	fwprintf(stderr, L"      separated by a colon(:); each set starts with an (optional) 'L'-prefixed level (tree depth)\n");
+	fwprintf(stderr, L"      for which the set applies -- no 'L' level implies the set applies to *all* tree depths.\n");
+	fwprintf(stderr, L"      A '+' or '-' prefix for the number implies 'this and all higher(inside)' and 'this and all\n");
+	fwprintf(stderr, L"      lower(outside)' levels apply.\n");
+	fwprintf(stderr, L"\n");
+	fwprintf(stderr, L"      Condition sets are evaluated in order of appearance and function as a a logical OR: any\n");
+	fwprintf(stderr, L"      matching condition set will result in the file/line being output.");
+	fwprintf(stderr, L"\n");
+	fwprintf(stderr, L"      The set further includes a comma(,) separated set of conditions, each typed by a prefix:\n");
+	fwprintf(stderr, L"      - 'S' (size check): specify any of < <= = => > followed by a number. Number can have unit\n");
+	fwprintf(stderr, L"                          postfix 'K' (1000), 'M' (1e6), 'G' (1e9), 'T' (1e12)\n");
+	fwprintf(stderr, L"      - 'TS' (tree size check): specify any of < <= = => > followed by a number. Number can have\n");
+	fwprintf(stderr, L"                          unit postfix 'K' (1000), 'M' (1e6), 'G' (1e9), 'T' (1e12)\n");
+	fwprintf(stderr, L"      - 'A' (attribute check): specify one of the m,w,r attribute sets by prefixing with\n");
+	fwprintf(stderr, L"                          'M=', 'W=', 'R=' (must, want, reject). No prefix implies MUST('M') set.\n");
+	fwprintf(stderr, L"      - 'C' (count check): specify prefix 'D' (directories), 'F' (files), 'TD' (dirs in tree),\n");
+	fwprintf(stderr, L"                          'TF' (files in tree); no prefix implies 'F'. specify any of < <= = => >\n");
+	fwprintf(stderr, L"                          followed by a number. Number can have unit 'K', 'M', etc. same as above.\n");
+	fwprintf(stderr, L"\n");
+	fwprintf(stderr, L"      'L' depth levels start at zero(0) as shown in the report lines output by this tool. Level\n");
+	fwprintf(stderr, L"      zero is the first level visited by the scan. 'TS' considers the total size collected for the\n");
+	fwprintf(stderr, L"      subtree at hand and is mostly useful for filtering '-u' disk usage reports. Ditto for 'C'.\n");
+	fwprintf(stderr, L"\n");
+	fwprintf(stderr, L"      Note that the 'C' conditions in particular require the tool to buffer its output as the\n");
+	fwprintf(stderr, L"      condition can only be sanely applied once all relevant counts have been collected,\n");
+	fwprintf(stderr, L"      resulting in increased memory usage an very \"bursty\" output once the conditions *can* be\n");
+	fwprintf(stderr, L"      applied.  Performance should be impacted only minimally, though.\n");
+	fwprintf(stderr, L"\n");
+	fwprintf(stderr, L"      Example filter: 'S>10M,A=R,AR=S:L+2S>=5M:L4,S>150,S<=1K'\n");
+	fwprintf(stderr, L"      Explanation: 'S>10M,A=R,AR=S' applies to all levels and selects only file sizes > 10M with\n");
+	fwprintf(stderr, L"      their read-only attribute set and must not have the system attrib.\n");
+	fwprintf(stderr, L"      'L+2S>=5M' applies to depth level 2 and selects any file size >= M. Note that the level 'L+2'\n");
+	fwprintf(stderr, L"      does not need to be followed by a comma, though doing so would help readability: 'L+2,S>=5M'\n");
+	fwprintf(stderr, L"      'L4,S>150,S<=1K' applies to depth level 4 only and picks any file that's between 150 bytes\n");
+	fwprintf(stderr, L"      '(exclusive bound) and 1K (inclusive bound). Note here that a range/band like this may be\n");
+	fwprintf(stderr, L"      specified like this, but we do not accept more complex (multi-band) size criteria mixes in a\n");
+	fwprintf(stderr, L"      condition set. If you want that, create multiple sets, e.g. 'S>150,S<=1K:S<20:S>1T' which\n");
+	fwprintf(stderr, L"      picks the same set of file sizes as before *plus* any file smaller than 20 bytes or larger\n");
+	fwprintf(stderr, L"      than 1Tb. This example has three sets, all applying to all depth levels as no 'L' prefix\n");
+	fwprintf(stderr, L"      was given in any of them: condition sets may overlap like that.\n");
 	fwprintf(stderr, L"\n");
 
     return -1;
