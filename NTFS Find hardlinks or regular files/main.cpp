@@ -118,6 +118,7 @@ public:
 	{
 		auto l = wcslen(str);
 		reserve(l);
+		ASSERT(size > l);
 		wcscpy_s(buf, size, str);
 		return *this;
 	}
@@ -152,7 +153,7 @@ typedef struct HashtableEntry
 {
 	uint32_t hash			{0};
     DWORD attrs				{0};
-    wstring path;
+    const WCHAR* path       {nullptr};
     uint64_t filesize       {0};
 	FILETIME timestamp		{0};
 } HashtableEntry;
@@ -577,12 +578,6 @@ void CvtUTF16ToUTF8(charbuffer &dst, const WCHAR* src)
         cvtErrors++;
     }
 	dst.reserve(len + 8 /* a little slack + space for terminating sentinel */ );
-#if 0
-	{
-        fwprintf(stderr, L"\rERROR: The UTF8 encoded string is too large: %d doesn't fit into the %zu byte buffer. The data will be truncated!\n    Offending string: \"%s\"\n", len, dst.space(), src);
-        cvtErrors++;
-    }
-#endif
 
 	char *p = dst;
     p[0] = 0;
@@ -608,11 +603,11 @@ void CloseOutput(void)
             HashtableEntry *slot = &OutputFilePaths[i];
             if (!slot->hash)
                 continue;
-            ASSERT(slot->path.c_str() != NULL);
+            ASSERT(slot->path != NULL);
 
             // write filename as UTF8 and check it for sanity while we do:
             charbuffer fname;
-            CvtUTF16ToUTF8(fname, slot->path.c_str());
+            CvtUTF16ToUTF8(fname, slot->path);
             if (conciseOutput)
             {
                 fprintf(output, "%s\n", fname.c_str());
@@ -630,11 +625,13 @@ void CloseOutput(void)
 
                 fprintf(output, "$%08lx:%s %s %s %s\n", (unsigned long)attrs, attr_str, fsize_str, time_str, fname.c_str());
             }
+
+            free((void *)slot->path);
         }
 
         fclose(output);
 
-        //memset(OutputFilePaths, 0, sizeof(OutputFilePaths));
+        memset(OutputFilePaths, 0, sizeof(OutputFilePaths));
     }
     output = NULL;
 }
@@ -648,7 +645,7 @@ int TestAndAddInHashtable(const WCHAR* str, const DWORD attrs, uint64_t filesize
 
     while (slot->hash)
     {
-        if (slot->path == str)
+        if (!wcscmp(slot->path, str))
             return 1;                   // 1: exists already
         do {
             // jump and test next viable slot
@@ -660,11 +657,40 @@ int TestAndAddInHashtable(const WCHAR* str, const DWORD attrs, uint64_t filesize
 
     assert(!slot->hash);
     slot->hash = hash;
-    slot->path = str;
+    slot->path = _wcsdup(str);
     slot->attrs = attrs;
     slot->filesize = filesize;
 	slot->timestamp = timestamp;
     return 0;                   // 0: not present before, ADDED now!
+}
+
+
+// overload these two Win32 APIs with our own 'self growing' charbuffer interface paramters...
+
+HANDLE FindFirstFileNameW(_In_ LPCWSTR lpFileName, _In_ DWORD dwFlags, _Inout_ wcharbuffer &LinkName)
+{
+	DWORD slen = LinkName.space();
+	HANDLE h = FindFirstFileNameW(lpFileName, dwFlags, &slen, LinkName.data());
+	if (h == INVALID_HANDLE_VALUE && slen > LinkName.space())
+	{
+		LinkName.reserve(slen + 1);
+		slen = LinkName.space();
+		h = FindFirstFileNameW(lpFileName, dwFlags, &slen, LinkName.data());
+	}
+	return h;
+}
+
+BOOL FindNextFileNameW(_In_ HANDLE hFindStream, _Inout_ wcharbuffer &LinkName)
+{
+	DWORD slen = LinkName.space();
+	BOOL rv = FindNextFileNameW(hFindStream, &slen, LinkName.data());
+	if (slen > LinkName.space())
+	{
+		LinkName.reserve(slen + 1);
+		slen = LinkName.space();
+		rv = FindNextFileNameW(hFindStream, &slen, LinkName.data());
+	}
+	return rv;
 }
 
 
@@ -674,12 +700,10 @@ BOOL FileHasMultipleInstances(const WCHAR* FileName)
 {
 	wcharbuffer linkPath(wcslen(FileName));
     int linkCount = 0;
-    DWORD slen = linkPath.space();
-    HANDLE fnameHandle = FindFirstFileNameW(FileName, 0, &slen, linkPath);
-    if (fnameHandle != INVALID_HANDLE_VALUE)
+    HANDLE fnameHandle = FindFirstFileNameW(FileName, 0, linkPath);
+	if (fnameHandle != INVALID_HANDLE_VALUE)
     {
-        slen = linkPath.space();
-        if (FindNextFileNameW(fnameHandle, &slen, linkPath))
+        if (FindNextFileNameW(fnameHandle, linkPath))
         {
             linkCount++;
         }
@@ -981,8 +1005,7 @@ uint64_t ProcessFile(const WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BO
             {
                 wcharbuffer linkPath(wcslen(FileName));
                 wcharbuffer fullPath;
-                DWORD slen = linkPath.space();
-                HANDLE fnameHandle = FindFirstFileNameW(FileName, 0, &slen, linkPath);
+                HANDLE fnameHandle = FindFirstFileNameW(FileName, 0, linkPath);
                 if (fnameHandle != INVALID_HANDLE_VALUE)
                 {
                     if (wcscmp(linkPath, FileName + 6 /* skip \\?\X: long filename prefix plus drive part as that is not present in the link path */))
@@ -993,8 +1016,7 @@ uint64_t ProcessFile(const WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BO
                         TestAndAddInHashtable(fullPath, attrs | FILE_ATTRIBUTE_HARDLINK, filesize, latest_time, UniqueFilePaths);
                     }
 
-                    slen = linkPath.space();
-                    while (FindNextFileNameW(fnameHandle, &slen, linkPath))
+                    while (FindNextFileNameW(fnameHandle, linkPath))
                     {
                         if (wcscmp(linkPath, FileName + 6 /* skip \\?\X: long filename prefix plus drive part as that is not present in the link path */))
                         {
@@ -1003,7 +1025,6 @@ uint64_t ProcessFile(const WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BO
                             wcscat_s(fullPath.data(), fullPath.space(), linkPath);
                             TestAndAddInHashtable(fullPath, attrs | FILE_ATTRIBUTE_HARDLINK, filesize, latest_time, UniqueFilePaths);
                         }
-                        slen = linkPath.space();
                     }
                     FindClose(fnameHandle);
                 }
@@ -1094,8 +1115,7 @@ uint64_t ProcessFile(const WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BO
 			{
 				wcharbuffer linkPath(wcslen(FileName));
 				int linkCount = 0;
-				DWORD slen = linkPath.space();
-				HANDLE fnameHandle = FindFirstFileNameW(FileName, 0, &slen, linkPath);
+				HANDLE fnameHandle = FindFirstFileNameW(FileName, 0, linkPath);
 				if (fnameHandle == INVALID_HANDLE_VALUE)
 				{
 					fwprintf(stderr, L"\rError reading link names for %s:\n", FileName);
@@ -1109,14 +1129,12 @@ uint64_t ProcessFile(const WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BO
 					}
 					linkCount++;
 
-					slen = linkPath.space();
-					while (FindNextFileNameW(fnameHandle, &slen, linkPath))
+					while (FindNextFileNameW(fnameHandle, linkPath))
 					{
 						if (wcscmp(linkPath, FileName + 6 /* skip \\?\X: long filename prefix plus drive part as that is not present in the link path */))
 						{
 							fwprintf(stdout, L"\r#--Link: %2.2s%s\n", FileName + 4, linkPath.c_str());
 						}
-						slen = linkPath.space();
 						linkCount++;
 					}
 					// EVERY file has ONE "hardlink" at least. UNIX-like "hardlinked files" have MULTIPLE sites:
@@ -1393,9 +1411,8 @@ uint64_t ProcessDirectory(wcharbuffer &PathName, wcharbuffer &SearchPattern,
                 if (Recurse)
                 {
 					searchName.reserve(PathNameLen + 4);
-					fileSearchName.reserve(PathNameLen + 4);
 					swprintf(searchName, searchName.space(), L"%.*s\\*.*", (int)(dirEnd - PathName.c_str()), PathName.c_str());
-                    swprintf(fileSearchName, fileSearchName.space(), L"%s", PathName.c_str());
+                    fileSearchName = PathName;
                 }
                 else
                 {
@@ -1678,8 +1695,8 @@ int wmain(int argc, WCHAR* argv[])
         }
     }
 
-    //memset(UniqueFilePaths, 0, sizeof(UniqueFilePaths));
-    //memset(OutputFilePaths, 0, sizeof(OutputFilePaths));
+    memset(UniqueFilePaths, 0, sizeof(UniqueFilePaths));
+    memset(OutputFilePaths, 0, sizeof(OutputFilePaths));
 
     output = NULL;
     atexit(CloseOutput);
@@ -1779,7 +1796,7 @@ int wmain(int argc, WCHAR* argv[])
 			NormalizePathSeparators(buf);
 
 			// https://docs.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
-			wcsncpy_s(searchPath, searchPath.space(), L"\\\\?\\", 4);
+			searchPath = L"\\\\?\\";
 
 			PWCHAR filePart = NULL;
 			GetFullPathName(buf, searchPath.space() - 4, searchPath + 4, &filePart);
