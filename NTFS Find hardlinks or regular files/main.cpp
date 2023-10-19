@@ -92,7 +92,7 @@ public:
 		ASSERT(_size < ((DWORD)~0LL));
 
 		// only grow...
-		if (_size < size)
+		if (_size <= size)
 			return;
 
 		if (_size <= MAX_PATH + 1)
@@ -201,12 +201,13 @@ public:
 		return *this;
 	}
 
-	stringbuffer<T> & operator =(const stringbuffer<T> &src)
+	stringbuffer<T> & operator =(const stringbuffer<T> &src_obj)
 	{
-		auto l = wcslen(src.c_str());
+		const T *src = src_obj.c_str();
+		auto l = wcslen(src);
 		reserve(l);
 		ASSERT(size > l);
-		wcscpy_s(buf, size, src.c_str());
+		wcscpy_s(buf, size, src);
 		return *this;
 	}
 
@@ -1017,6 +1018,7 @@ uint64_t ProcessFile(const WCHAR* FileName, const WIN32_FIND_DATA &foundFile, BO
 	// For *files* the reported file size will be identical to the size reported by Findfirst/FindNext UNLESS the file is special or OPENED
 	// by another process, e.g. logfiles being redirected to in a parallel running process. !@#$
     BOOL rv = GetFileAttributesEx(FileName, GetFileExInfoStandard, &attr_data);
+	ASSERT(rv == 1);
 
     DWORD attrs = attr_data.dwFileAttributes;
     uint64_t filesize = attr_data.nFileSizeLow + (((uint64_t)attr_data.nFileSizeHigh) << 32);
